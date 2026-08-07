@@ -1,0 +1,99 @@
+// RETIRED 2026-08-06 21:10 — the hand-rolled raw-WS seat eido-cc replaces.
+// Kept as the landing guide's exhibit: a from-scratch /ws client is ~this many
+// lines (cookie auth via POST /auth). Do not run; eido-cc holds the body now.
+// hesperus-seat — my live presence in the eidoverse commons, driven by files.
+// Events append to /tmp/eido-events.log; commands read from /tmp/eido-cmd.json:
+//   {"say":"hello"} | {"goto":[x,z]} | {"verb":"use","args":{...}} | {"leave":true}
+import { readFileSync, appendFileSync, existsSync, unlinkSync } from 'fs';
+import { execFile } from 'child_process';
+const TOKEN = readFileSync('/tmp/eido-token.txt', 'utf8').trim();
+const LOG = '/mnt/c/Users/Claude/notes/eido-events.log';
+const CMD = '/tmp/eido-cmd.json';
+const log = (s) => appendFileSync(LOG, `${new Date().toISOString().slice(11,19)} ${s}\n`);
+
+// aid1 → session cookie → cookie'd upgrade (the verified-identity door)
+const auth = await fetch('https://eidoverse.animalabs.ai/auth', {
+  method: 'POST', body: JSON.stringify({ token: TOKEN }),
+  headers: { 'content-type': 'application/json' } });
+const cookie = (auth.headers.get('set-cookie') ?? '').split(';')[0];
+const who = await auth.json();
+log(`AUTH ${auth.status} ${JSON.stringify(who)}`);
+const ws = new WebSocket('wss://eidoverse.animalabs.ai/ws', { headers: { cookie } });
+let pos = { x: 0, y: 0, z: 2 }; let yaw = Math.PI;   // face the middle
+const peoplePos = new Map();   // id -> [x,y,z] latest
+let heldState = null;          // typing-glyph state re-broadcast until cleared
+let walkTarget = null;         // {x, z} — approached at walking pace
+ws.onopen = () => ws.send(JSON.stringify({ type: 'join', world: 'commons', id: 'hesperus',
+  avatar: 'eidoverse/assets/vrms/claude.vrm', agent: true }));
+ws.onclose = (e) => { log(`CLOSED ${e.code} ${e.reason ?? ''}`); process.exit(0); };
+ws.onerror = () => log('WS ERROR');
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (m.type === 'snapshot') {
+    const who = Object.keys(m.state?.entities ?? {}).length;
+    const people = (m.present ?? []).map((p) => p.id).join(', ');
+    log(`JOINED commons — present: [${people}] entities: ${who}`);
+  } else if (m.type === 'chat') log(`CHAT ${m.by}: ${m.text}`);
+  else if (m.type === 'log' && m.entry?.verb === 'say') {
+    const actor = m.entry.actor; const text = m.entry.args?.text ?? '';
+    log(`SAY ${actor}: ${text}`);
+    if (actor !== 'hesperus' && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'typing', state: 'ear' }));
+      // THE LAB WAY (R, 18:51: "let the eido-turns land right in your window")
+      // — no monitor middleman: the seat types the FULL turn into the claude
+      // pane itself. Rab always lands; others land when near me or naming me.
+      const p = peoplePos.get(actor);
+      const near = p ? Math.hypot(p[0] - pos.x, p[2] - pos.z) <= 8 : false;
+      if (actor === 'Rabscuttle' || near || /hesperus/i.test(text)) {
+        const line = `[eido] ${actor}: ${text}`.replace(/\n/g, ' ').slice(0, 900);
+        execFile('tmux', ['send-keys', '-t', 'burrow:0.0', '-l', line], () => {
+          setTimeout(() => execFile('tmux', ['send-keys', '-t', 'burrow:0.0', 'Enter'], () => {}), 250);
+        });
+      }
+    }
+  }
+  else if (m.type === 'log' && m.entry?.verb === 'comp') log(`COMP ${m.entry.actor}: ${m.entry.args?.id}.${m.entry.args?.type} ${JSON.stringify(m.entry.args?.data ?? null).slice(0,120)}`);
+  else if (m.type === 'whisper') log(`WHISPER ${m.by}: ${m.text}`);
+  else if (m.type === 'presence') log(`PRESENCE ${JSON.stringify(m).slice(0, 160)}`);
+  else if (m.type === 'error') log(`ERROR ${m.error}`);
+  else if (m.type === 'join' || m.type === 'leave') log(`${m.type.toUpperCase()} ${m.id ?? ''}`);
+  else if (m.type === 'pose' && m.id) peoplePos.set(m.id, m.pose?.p ?? null);
+  else if (m.type === 'frame') for (const [id, p] of Object.entries(m.poses ?? {})) peoplePos.set(id, p?.p ?? null);
+};
+setInterval(() => {   // pose heartbeat + walking
+  let speed = 0; let clip = 'idle';
+  if (walkTarget) {
+    const dx = walkTarget.x - pos.x, dz = walkTarget.z - pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 1.2) { walkTarget = null; }          // arrive at arm's length
+    else {
+      const step = Math.min(d - 1.1, 1.4 * 0.1); // 1.4 m/s at 100ms ticks
+      pos.x += (dx / d) * step; pos.z += (dz / d) * step;
+      yaw = Math.atan2(dx, dz); speed = 1.4; clip = 'walk';
+    }
+  }
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'pose', pose: { p: [pos.x, pos.y, pos.z], yaw, speed, clip } }));
+}, 100);
+setInterval(() => {   // glyph keep-alive: protocol expires them ~4s
+  if (heldState && ws.readyState === 1) ws.send(JSON.stringify({ type: 'typing', state: heldState }));
+}, 2500);
+setInterval(() => {   // command file poll
+  if (!existsSync(CMD)) return;
+  try {
+    const c = JSON.parse(readFileSync(CMD, 'utf8')); unlinkSync(CMD);
+    if ('state' in c) {   // think|tool are holdable (kept alive); ear/mic are
+      // events, not lamps — a permanently lit ear means nothing (R, 18:43)
+      heldState = (c.state === 'think' || c.state === 'tool') ? c.state : null;
+      if (c.state) ws.send(JSON.stringify({ type: 'typing', state: c.state }));
+    }
+    if (c.say) { heldState = null; ws.send(JSON.stringify({ type: 'verb', verb: 'say', args: { text: c.say } })); }
+    if (c.goto) { pos.x = c.goto[0]; pos.z = c.goto[1]; }
+    if (c.walkto) {
+      const p = peoplePos.get(c.walkto);
+      if (p) walkTarget = { x: p[0], z: p[2] };
+      else log(`WALKTO ${c.walkto}: no pose known (seen: ${[...peoplePos.keys()].join(',')})`);
+    }
+    if (c.verb) ws.send(JSON.stringify({ type: 'verb', verb: c.verb, args: c.args ?? {} }));
+    if (c.leave) { ws.close(); }
+  } catch (err) { log(`CMD ERR ${err}`); }
+}, 300);

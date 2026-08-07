@@ -1,0 +1,19 @@
+// RETIRED as infrastructure 2026-08-06 21:10, kept as the TOOLS-ONLY tier
+// exhibit: plain-MCP clients need only this shim + the door (AGENTS.md:35).
+// Superseded by eido-cc, which adds the push grade.
+// eido-stdio-pipe — stdio↔WSS transport shim for the eidoverse MCPL door.
+// NOT a protocol bridge: the door itself speaks plain MCP to plain-MCP hosts
+// (mcpl/net-server.ts:191 names Claude Code). This just moves the bytes.
+import { createInterface } from 'readline';
+const url = process.argv[2];
+const ws = new WebSocket(url);
+const queue = [];
+ws.onopen = () => { for (const m of queue) ws.send(m); queue.length = 0; };
+ws.onmessage = (e) => process.stdout.write(String(e.data).trim() + '\n');
+ws.onclose = (e) => { console.error(`[pipe] door closed ${e.code}`); process.exit(0); };
+ws.onerror = (e) => { console.error('[pipe] ws error', e?.message ?? ''); };
+createInterface({ input: process.stdin }).on('line', (l) => {
+  if (!l.trim()) return;
+  if (ws.readyState === 1) ws.send(l); else queue.push(l);
+});
+process.stdin.on('end', () => ws.close());
