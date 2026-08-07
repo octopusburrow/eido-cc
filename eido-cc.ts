@@ -124,6 +124,14 @@ class DoorClient {
   private seenMessageIds = new Set<string>();
   tools: unknown[] = [];
   onWake: (content: string, meta: Record<string, string>) => void = () => {};
+
+  /** Lane state, for the banner every wake carries (#58). The adapter always
+   *  knew this; nothing surfaced it, so an agent could be live in a room for
+   *  20 minutes while both it and its human believed otherwise. */
+  lanes: string[] = [];              // channel ids the door registered us on
+  doorUrl = "";                      // which door — prod vs lab is invisible otherwise
+  connectedAt = 0;                   // ms; "how long have I been here"
+  lastDelivery = 0;                  // ms of the last inbound message of any kind
   onToolsReady: () => void = () => {};
   private ambient: Accrued[] = [];
   private toolsReadyFired = false;
@@ -139,6 +147,7 @@ class DoorClient {
     }
     const url = `${process.env.EIDO_URL ?? "wss://eidoverse.animalabs.ai/mcpl"}?token=${encodeURIComponent(token)}`;
     dbg(`dialing ${url.slice(0, 60)}…`);
+    this.doorUrl = url.split("?")[0];   // no token in anything that reaches context
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.onopen = () => { this.backoffMs = 5_000; void this.handshake().catch((e) => log("handshake failed:", e.message)); };
@@ -273,6 +282,8 @@ class DoorClient {
         const chans = (params.channels ?? []) as { id: string }[];
         this.respond(msg.id, { results: chans.map((c) => ({ id: c.id, accepted: true })) });
         if (chans[0]?.id) this.worldChannelId = chans[0].id; // typing target
+        this.lanes = chans.map((c) => c.id);
+        this.connectedAt = Date.now();
         dbg(`registered channels: ${chans.map((c) => c.id).join(", ")}`);
         break;
       }
@@ -332,6 +343,7 @@ class DoorClient {
         .map((b) => b.text).join("\n");
       const ts = (m.timestamp ?? new Date().toISOString()).slice(11, 16);
       results.push({ messageId: m.messageId, accepted: true });
+      this.lastDelivery = Date.now();
 
       if (shouldWake(tags, m.metadata)) {
         this.wake(text, ts, tags, m);
@@ -342,6 +354,20 @@ class DoorClient {
       }
     }
     this.respond(id, { results });                                    // §14.3 per-message results
+  }
+
+  /** One line: which door, which lanes, how long, effective wake config.
+   *  EFFECTIVE, not requested — today's failure was config written to a file
+   *  and reported as live while the process that reads it started an hour
+   *  earlier. Reading it from the live process is the whole point. */
+  laneBanner(): string {
+    const mins = this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 60000) : 0;
+    const quiet = this.lastDelivery ? Math.round((Date.now() - this.lastDelivery) / 60000) : -1;
+    const where = this.doorUrl.replace(/^wss?:\/\//, "").replace(/\/mcpl.*$/, "");
+    const wake = ["chat:addressed (always)", ...WAKE_PATTERNS].join(", ");
+    return `⟨lanes⟩ live on ${this.lanes.join(", ") || "(none)"} via ${where || "?"}`
+      + ` · connected ${mins}m` + (quiet >= 0 ? ` · last inbound ${quiet}m ago` : "")
+      + ` · wakes on: ${wake}`;
   }
 
   /** Wake CC: fold accrued ambient (capped) above the trigger, server-cc style. */
@@ -359,6 +385,11 @@ class DoorClient {
       lines.push("");
     }
     lines.push(`» [${ts}Z] ${text}   ⟵ addressed to you (${tags.join(",") || "legacy-mention"})`);
+    // Lane banner (#58). NOT a periodic heartbeat — welded to the wake, because
+    // a wake is exactly when beliefs about "where am I" get formed, and a timer
+    // firing into the ambient buffer is just noise to scroll past. Costs one
+    // line and cannot be missed: you cannot wake without seeing where you live.
+    lines.push("", this.laneBanner());
     this.onWake(lines.join("\n"), {
       source: "eidoverse",
       channelId: m.channelId,
