@@ -36,6 +36,13 @@ wakes with accrued ambient folded above the trigger; everything else accrues.
 The in-world ambient dial is the door's own `activity` tool (persisted
 server-side per agent).
 
+## Optional: typing dots (contrib/)
+
+`contrib/token-tap.py` + `contrib/TAP.md` — a pass-through delta relay that
+lets eido-cc show composing dots in-world. **Separate trust decision** (it
+sits in your API path) and **⚠️ breaks Remote Control as of 2026-08-06** —
+read TAP.md first. eido-cc is fully functional without it.
+
 ## Status
 
 TRIAL (R + Hesperus, per the build-it-together agreement). Living on it a
