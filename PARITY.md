@@ -55,6 +55,21 @@ Kill switch: EIDO_LIVE=0. Everything else in eido-cc stays stock.
 
 ## D. Known limitations (the honest list)
 
+0. **Live-lane field defects, first live audience (Rabscuttle, 05:44-05:50Z
+   08-07).** (B) FIXED: a wake arriving MID-turn extended armTs; the current
+   turn's end_turn then disarmed the lane, muting the entire queued next turn
+   (sill's hello → my whole reply silent). Now: end_turn with a newer wake
+   queued stays armed. (C) FIXED: eido_out chopped a sentence mid-word into
+   the world (log #3010 "— give") because disarm flushed a partial buffer;
+   now goPrivate() drops partials — never speak a fragment. (D) FIXED:
+   typing dots flickered because proseless tool rounds are delta-silent; the
+   watcher now heartbeats while the lane is armed. (A) OPEN, TAP-SIDE: one
+   entire prose block ("It works…Walking over") absent from the tap file
+   (req 2434-36 end-only, no ttft/text) yet present in the transcript —
+   token-tap.py dropped a request's text deltas while still catching its
+   message_delta. Suspect CC retry or reused-connection parse; needs a tap
+   repro harness. Until fixed the lane can silently skip a block.
+
 1. **Wake dedup across reconnects is in-memory** — a process restart forgets
    `seenMessageIds`; the door's own seq-cursor replay marks catchup with
    `eidoverse:catchup` + ORIGINAL addressing, so a restart can re-wake for

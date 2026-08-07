@@ -366,6 +366,7 @@ class DoorClient {
 // §14.5 conformance: chunks are advisory-only; delivery stays say/publish.
 
 class TypingWatcher {
+  liveSay: LiveSay | null = null;
   private lastSize = -1;
   private idx = 0;
   private streaming = false;
@@ -415,10 +416,11 @@ class TypingWatcher {
 // from voicebox TapBrain (lane demux by req id, ghost-lane filter, Stop-hook
 // turn end, stall unlatch — each clause was found live; see voicebox.py).
 class LiveSay {
-  private armed = false;
+  armed = false;
   private pos = 0;
   private armTs = 0;
   private lane: number | null = null;
+  private latchTs = 0;
   private laneSeen = 0;
   private laneOver = 0;
   private buf = "";
@@ -439,6 +441,12 @@ class LiveSay {
     this.lane = null; this.laneOver = 0; this.buf = ""; this.raw = ""; this.inFence = false;
     dbg(`live lane ARMED (${reason})`);
     this.timer = setInterval(() => void this.tick(), 300);
+  }
+
+  goPrivate(): void {
+    // eido_out: discard any partial sentence (never speak a fragment) and stop
+    this.buf = ""; this.raw = ""; this.inFence = false;
+    this.disarm("eido_out tool");
   }
 
   disarm(reason: string): void {
@@ -475,13 +483,19 @@ class LiveSay {
       try { ev = JSON.parse(line); } catch { continue; }
       if (this.lane === null && ev.event === "ttft" &&
           /opus|fable/.test(String(ev.model ?? "")) && !ev.ghost) {
-        this.lane = Number(ev.req); this.laneSeen = Date.now();
+        this.lane = Number(ev.req); this.laneSeen = this.latchTs = Date.now();
       } else if (ev.req === this.lane) {
         this.laneSeen = Date.now();
         if (ev.end) {
           this.flush(true); // a lane end is a spoken-phrase end — ship it
           this.lane = null; this.laneOver = Date.now();
-          if (ev.stop === "end_turn") return this.disarm("end_turn");
+          if (ev.stop === "end_turn") {
+            // a wake that arrived MID-turn re-extended armTs; that turn is
+            // already queued in CC — stay armed for it instead of muting it
+            // (defect B, first hit: sill's 05:44 hello, whole reply silent)
+            if (this.armTs > this.latchTs) { dbg("end_turn but newer wake queued — staying armed"); continue; }
+            return this.disarm("end_turn");
+          }
         } else if (typeof ev.text === "string") {
           this.ingest(ev.text);
         }
@@ -517,7 +531,7 @@ class LiveSay {
     if (this.buf.length > 400) { this.speak(this.buf); this.buf = ""; } // runaway clause
   }
 
-  private flush(force: boolean): void {
+  flush(force: boolean): void {
     if (!this.inFence) this.buf += this.raw; // tail carry belongs to the phrase
     if (force && this.buf.trim().length > 1) this.speak(this.buf);
     this.buf = ""; this.raw = ""; this.inFence = false;
@@ -605,7 +619,7 @@ class CcServer {
       case "tools/call": {
         const name = String(params.name);
         if (name === "eido_out") {
-          this.liveSay?.disarm("eido_out tool");
+          this.liveSay?.goPrivate();
           this.respond(msg.id, { content: [{ type: "text", text: "live lane off for this turn — prose is private again" }] });
           break;
         }
@@ -637,6 +651,7 @@ const cc = new CcServer(door);
 const typing = new TypingWatcher(door);
 const liveSay = new LiveSay(door);
 cc.liveSay = liveSay;
+typing.liveSay = liveSay;
 { // stamp the composing window + arm the live lane on every wake
   const inner = door.onWake;
   door.onWake = (content, meta) => {
