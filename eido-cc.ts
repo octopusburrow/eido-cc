@@ -462,11 +462,16 @@ class LiveSay {
     // Stop-hook stamp postdating the arm = the turn is genuinely over
     // (voicebox: postdates-the-INJECT, not lane-close — sidecar stamps lied)
     if (this.lane === null && this.laneOver) {
+      let haveStamp = false;
       try {
         const st = await Bun.file(this.turnEndStamp).stat();
+        haveStamp = true;
         if (st.mtime.getTime() > this.armTs) return this.disarm("turn end (Stop hook)");
       } catch { /* no stamp file */ }
-      if (Date.now() - this.laneOver > 45_000) return this.disarm("gone quiet");
+      // quiet-timeout is a FALLBACK for a missing stamp only: silent tool
+      // work routinely exceeds any short threshold mid-turn (defect E) —
+      // with a stamp present, turn end + the 10min cap are the exits.
+      if (!haveStamp && Date.now() - this.laneOver > 90_000) return this.disarm("gone quiet (no stamp)");
     }
     if (this.lane !== null && this.laneSeen && Date.now() - this.laneSeen > 25_000) {
       this.lane = null; this.laneOver = Date.now(); // wedged lane must not deafen the turn
