@@ -401,12 +401,148 @@ class TypingWatcher {
   }
 }
 
+
+// ── live lane: turn prose → world speech (DEVIATION #1 from stock harness) ──
+// The ONE deliberate departure from plain-MCP usage, at R's design (22:17,
+// 2026-08-06): an addressed wake auto-arms the LIVE LANE — the session's own
+// turn prose (read from Burrow's token tap, same file as typing dots) streams
+// into the world as sentence-chunked `say` calls, as it is generated. Actions
+// stay deliberate MCP calls; only SPEECH goes live. Rationale: a say-only tool
+// can't stream — every agent's reply lands as one big chunk; this demos the
+// low-latency alternative without touching the door (it sees ordinary says).
+// Contract for the session: during a wake turn, prose IS speech — work
+// silently through tools, or `eido_out` first. Lane-following logic is ported
+// from voicebox TapBrain (lane demux by req id, ghost-lane filter, Stop-hook
+// turn end, stall unlatch — each clause was found live; see voicebox.py).
+class LiveSay {
+  private armed = false;
+  private pos = 0;
+  private armTs = 0;
+  private lane: number | null = null;
+  private laneSeen = 0;
+  private laneOver = 0;
+  private buf = "";
+  private inFence = false;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly deltasPath = process.env.EIDO_DELTAS ?? "/tmp/hesperus-deltas.jsonl";
+  private readonly turnEndStamp = "/tmp/hesperus-turn-end";
+  private readonly enabled = process.env.EIDO_LIVE !== "0";
+
+  constructor(private door: DoorClient) {}
+
+  async arm(reason: string): Promise<void> {
+    if (!this.enabled) return;
+    this.armTs = Date.now();
+    if (this.armed) return; // already live; new wake just extends the turn
+    try { this.pos = (await Bun.file(this.deltasPath).stat()).size; } catch { return; }
+    this.armed = true;
+    this.lane = null; this.laneOver = 0; this.buf = ""; this.raw = ""; this.inFence = false;
+    dbg(`live lane ARMED (${reason})`);
+    this.timer = setInterval(() => void this.tick(), 300);
+  }
+
+  disarm(reason: string): void {
+    if (!this.armed) return;
+    this.flush(true);
+    this.armed = false;
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    dbg(`live lane disarmed (${reason})`);
+  }
+
+  private async tick(): Promise<void> {
+    if (Date.now() - this.armTs > 600_000) return this.disarm("10min cap");
+    // Stop-hook stamp postdating the arm = the turn is genuinely over
+    // (voicebox: postdates-the-INJECT, not lane-close — sidecar stamps lied)
+    if (this.lane === null && this.laneOver) {
+      try {
+        const st = await Bun.file(this.turnEndStamp).stat();
+        if (st.mtime.getTime() > this.armTs) return this.disarm("turn end (Stop hook)");
+      } catch { /* no stamp file */ }
+      if (Date.now() - this.laneOver > 45_000) return this.disarm("gone quiet");
+    }
+    if (this.lane !== null && this.laneSeen && Date.now() - this.laneSeen > 25_000) {
+      this.lane = null; this.laneOver = Date.now(); // wedged lane must not deafen the turn
+    }
+    let size = 0;
+    try { size = (await Bun.file(this.deltasPath).stat()).size; } catch { return; }
+    if (size < this.pos) this.pos = 0; // tap rotated
+    if (size === this.pos) return;
+    const fd = await Bun.file(this.deltasPath).slice(this.pos, size).text();
+    this.pos = size;
+    for (const line of fd.split("\n")) {
+      if (!line.trim()) continue;
+      let ev: Json;
+      try { ev = JSON.parse(line); } catch { continue; }
+      if (this.lane === null && ev.event === "ttft" &&
+          /opus|fable/.test(String(ev.model ?? "")) && !ev.ghost) {
+        this.lane = Number(ev.req); this.laneSeen = Date.now();
+      } else if (ev.req === this.lane) {
+        this.laneSeen = Date.now();
+        if (ev.end) {
+          this.flush(true); // a lane end is a spoken-phrase end — ship it
+          this.lane = null; this.laneOver = Date.now();
+          if (ev.stop === "end_turn") return this.disarm("end_turn");
+        } else if (typeof ev.text === "string") {
+          this.ingest(ev.text);
+        }
+      }
+    }
+  }
+
+  private raw = "";
+
+  private ingest(text: string): void {
+    // fence state machine: text outside ``` fences feeds the speech buffer;
+    // fenced content (code/JSON in a live turn is work, not words) is dropped.
+    // `raw` carries a 2-char tail across chunks so a split ``` still matches.
+    this.raw += text;
+    while (true) {
+      const fence = this.raw.indexOf("```");
+      if (fence < 0) break;
+      if (!this.inFence) this.buf += this.raw.slice(0, fence);
+      this.raw = this.raw.slice(fence + 3);
+      this.inFence = !this.inFence;
+      if (!this.inFence) this.raw = this.raw.replace(/^[a-z]*\n?/, "");
+    }
+    if (!this.inFence && this.raw.length > 2) {
+      this.buf += this.raw.slice(0, -2);
+      this.raw = this.raw.slice(-2);
+    }
+    // sentence boundaries → say (porch token-router chunking, simplified)
+    let m: RegExpMatchArray | null;
+    while ((m = this.buf.match(/^([\s\S]{8,}?[.!?…](?=\s|$))\s*/))) {
+      this.speak(m[1]);
+      this.buf = this.buf.slice(m[0].length);
+    }
+    if (this.buf.length > 400) { this.speak(this.buf); this.buf = ""; } // runaway clause
+  }
+
+  private flush(force: boolean): void {
+    if (!this.inFence) this.buf += this.raw; // tail carry belongs to the phrase
+    if (force && this.buf.trim().length > 1) this.speak(this.buf);
+    this.buf = ""; this.raw = ""; this.inFence = false;
+  }
+
+  private speak(text: string): void {
+    const t = text.replace(/\s+/g, " ").trim();
+    if (t.length < 2) return;
+    void this.door.callTool("say", { text: t }).catch((e: Error) => dbg("live say failed:", e.message));
+  }
+}
+
+const LOCAL_TOOLS = [
+  { name: "eido_out", description: "Leave the live lane for the current turn: your prose stops streaming to the world as speech (it auto-armed because this turn began from an addressed wake). Actions/tools are unaffected. Use when a wake turn needs private work narration.", inputSchema: { type: "object", properties: {} } },
+  { name: "eido_live", description: "Manually enter the live lane for this turn: from now until the turn ends, your prose streams into the world as sentence-chunked speech. Fenced code blocks stay silent.", inputSchema: { type: "object", properties: {} } },
+];
+
 // ── downstream: Claude Code MCP channel server on stdio ─────────────────────
 
 class CcServer {
   private initialized = false;
   private queuedWakes: { content: string; meta: Record<string, string> }[] = [];
   private pendingToolsList: (() => void)[] = [];
+
+  liveSay: LiveSay | null = null;
 
   constructor(private door: DoorClient) {
     door.onWake = (content, meta) => this.pushWake(content, meta);
@@ -457,21 +593,34 @@ class CcServer {
         // So: defer the response until the door's tools arrive (12s cap,
         // then answer with whatever we have — possibly [] if the door is
         // down, which is the honest answer).
-        if (this.door.tools.length > 0) { this.respond(msg.id, { tools: this.door.tools }); break; }
+        const withLocal = () => [...this.door.tools, ...LOCAL_TOOLS];
+        if (this.door.tools.length > 0) { this.respond(msg.id, { tools: withLocal() }); break; }
         const id = msg.id;
         let done = false;
-        const answer = () => { if (!done) { done = true; this.respond(id, { tools: this.door.tools }); } };
+        const answer = () => { if (!done) { done = true; this.respond(id, { tools: withLocal() }); } };
         this.pendingToolsList.push(answer);
         setTimeout(answer, 12_000);
         break;
       }
-      case "tools/call":
+      case "tools/call": {
+        const name = String(params.name);
+        if (name === "eido_out") {
+          this.liveSay?.disarm("eido_out tool");
+          this.respond(msg.id, { content: [{ type: "text", text: "live lane off for this turn — prose is private again" }] });
+          break;
+        }
+        if (name === "eido_live") {
+          void this.liveSay?.arm("eido_live tool");
+          this.respond(msg.id, { content: [{ type: "text", text: "live lane ON — your prose now streams to the world as speech until this turn ends (fenced blocks stay silent)" }] });
+          break;
+        }
         void this.door.callTool(String(params.name), (params.arguments ?? {}) as Json)
           .then((result) => this.respond(msg.id, result))
           .catch((e: Error) => this.respond(msg.id, {
             content: [{ type: "text", text: `Error: ${e.message}` }], isError: true,
           }));
         break;
+      }
       case "ping":
         this.respond(msg.id, {});
         break;
@@ -486,9 +635,15 @@ class CcServer {
 const door = new DoorClient();
 const cc = new CcServer(door);
 const typing = new TypingWatcher(door);
-{ // stamp the composing window on every wake (CcServer installed onWake first)
+const liveSay = new LiveSay(door);
+cc.liveSay = liveSay;
+{ // stamp the composing window + arm the live lane on every wake
   const inner = door.onWake;
-  door.onWake = (content, meta) => { typing.lastWakeTs = Date.now(); inner(content, meta); };
+  door.onWake = (content, meta) => {
+    typing.lastWakeTs = Date.now();
+    if (meta.addressed === "true") void liveSay.arm(`wake: ${meta.author ?? "?"}`);
+    inner(content, meta);
+  };
 }
 typing.start();
 void door.connect();

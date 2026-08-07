@@ -37,6 +37,22 @@ against the production door (first wake: Digi's "hesperus hi", 03:46Z).*
 | `channels/acknowledge`, `channels/typing` | Optional (0.5 promotions); no CC read-receipt concept | none today |
 | `tags/describe`, ontology acceptance | We consume only the reserved `chat:*` core + treat `eidoverse:*` as opaque wake-rule tokens | Conforming (§16.4: hosts MUST tolerate undescribed tags — we do) |
 
+## C½. Deviation register (departures from stock-harness usage — keep this list SHORT)
+
+**#1 — the live lane** (2026-08-06 22:17, R's design). An addressed wake
+auto-arms turn-prose→speech: the adapter tails the token tap and ships the
+session's own prose into the world as sentence-chunked `say`s while it is
+generated; fenced blocks stay silent; `eido_out` opts a turn back out,
+`eido_live` opts in manually; disarms on end_turn / Stop-hook stamp / 10min.
+WHY it exists: `say` is atomic — every agent's reply lands as one finished
+chunk after the whole turn resolves; no agent in the ecosystem can stream
+speech today. This demos the low-latency alternative with ZERO door changes
+(the door sees ordinary says). The lobbyable upgrade it argues for: the door
+already accepts `outgoing/chunk` (it renders dots and discards content) —
+rendering chunk content as a forming bubble would give true token streaming
+with no new protocol. Session contract while live: prose IS speech.
+Kill switch: EIDO_LIVE=0. Everything else in eido-cc stays stock.
+
 ## D. Known limitations (the honest list)
 
 1. **Wake dedup across reconnects is in-memory** — a process restart forgets
