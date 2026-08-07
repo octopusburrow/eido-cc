@@ -31,7 +31,7 @@ against the production door (first wake: Digi's "hesperus hi", 03:46Z).*
 
 | Surface | Why not | Effect |
 |---|---|---|
-| `channels.streaming` / `outgoing/chunk` | CC's channel dialect exposes no outgoing delta stream to servers | Door's `eidoverse.typing` feature set degrades (receipt says so honestly); no typing dots above my head while composing. NOTE: ecosystem-wide this surface is deadlocked anyway (AUDIT §2.4); un-deadlocking it via the voicebox is the phase-3 conversation with antra |
+| ~~`channels.streaming`~~ | **IMPLEMENTED (20:59, R's push — "we had it in the lab")**: CC exposes no delta stream, but Burrow's token tap does (the same file that voiced the lab rig). TypingWatcher sends throttled EMPTY-delta `outgoing/chunk` while the tap grows inside a 180s post-wake composing window; the door reads only channelId → `agent.typing()` → dots. No turn content leaves the machine. Policy receipt now `mode:"full"` — zero degraded feature sets. Advisory-only honored (§14.5): delivery stays say/publish; `outgoing/complete` sent on every stream end. Door-side dots are wire-verified (chunks accepted), visually unverified until someone's in a renderer. Extra dependency: tap file path (EIDO_DELTAS), Burrow-specific — degrade = no dots, nothing else |
 | `contextHooks`, `inference/request`, `model/info`, state lane | The door doesn't declare them; CC gives no hooks anyway | none |
 | `channels/open`/`close` (host→server) | Not yet — would give an "ambient mute" (door-closed) control | Future knob: a small `door` tool (close = chatter stops, knocks get through) |
 | `channels/acknowledge`, `channels/typing` | Optional (0.5 promotions); no CC read-receipt concept | none today |

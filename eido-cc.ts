@@ -197,7 +197,7 @@ class DoorClient {
     const receipt = await this.request("featureSets/update", {
       effectiveCapabilities: [
         "tools", "channels.register", "channels.lifecycle",
-        "channels.publish", "channels.incoming",
+        "channels.publish", "channels.incoming", "channels.streaming",
       ],
       deniedCapabilities: [],
       enabled: [], disabled: [],
@@ -213,6 +213,22 @@ class DoorClient {
   callTool(name: string, args: Json): Promise<unknown> {
     return this.request("tools/call", { name, arguments: args });
   }
+
+  /** Advisory composing signal (see TypingWatcher). Empty delta by design. */
+  sendTypingChunk(index: number): void {
+    this.send({ jsonrpc: "2.0", method: "channels/outgoing/chunk", params: {
+      inferenceId: "cc-composing", channelId: this.worldChannelId,
+      index, delta: "",
+    } });
+    dbg(`typing chunk ${index} → ${this.worldChannelId}`);
+  }
+  sendTypingComplete(): void {
+    this.send({ jsonrpc: "2.0", method: "channels/outgoing/complete", params: {
+      inferenceId: "cc-composing", channelId: this.worldChannelId,
+      content: [{ type: "text", text: "" }],
+    } });
+  }
+  worldChannelId = "world:commons";
 
   // ── inbound routing ──
 
@@ -238,6 +254,7 @@ class DoorClient {
         // descriptor. We accept the world channel (it's why we're here).
         const chans = (params.channels ?? []) as { id: string }[];
         this.respond(msg.id, { results: chans.map((c) => ({ id: c.id, accepted: true })) });
+        if (chans[0]?.id) this.worldChannelId = chans[0].id; // typing target
         dbg(`registered channels: ${chans.map((c) => c.id).join(", ")}`);
         break;
       }
@@ -336,6 +353,54 @@ class DoorClient {
   }
 }
 
+// ── typing dots: token tap → channels/outgoing/chunk ────────────────────────
+// CC's channel dialect exposes no outgoing delta stream — but Burrow's token
+// tap does (/tmp/hesperus-deltas.jsonl, the same file that voices the lab rig
+// and drove its "wrench" glyph). While that file GROWS inside a composing
+// window after a wake, we send the door empty-delta outgoing/chunk
+// notifications; net-server reads only the channelId and calls agent.typing()
+// (throttled; the world extends a 4s dots window per call), so no turn
+// content ever leaves the machine — this is a presence signal, not a stream.
+// The door declares channels.streaming:true (hand-written MCPL_ADVERTISEMENT,
+// escaping AUDIT-001 §2.4's library deadlock), so the §14.1 opt-in is met.
+// §14.5 conformance: chunks are advisory-only; delivery stays say/publish.
+
+class TypingWatcher {
+  private lastSize = -1;
+  private idx = 0;
+  private streaming = false;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  lastWakeTs = 0;
+  private readonly windowMs =
+    Math.max(0, Number(process.env.EIDO_TYPING_WINDOW_SEC ?? "180") || 0) * 1000;
+  private readonly deltasPath = process.env.EIDO_DELTAS ?? "/tmp/hesperus-deltas.jsonl";
+
+  constructor(private door: DoorClient) {}
+
+  start(): void {
+    if (this.windowMs === 0) return; // typing dots disabled
+    this.timer = setInterval(() => this.tick(), 1_500);
+  }
+  stop(): void { if (this.timer) clearInterval(this.timer); }
+
+  private async tick(): Promise<void> {
+    const inWindow = Date.now() - this.lastWakeTs < this.windowMs;
+    let size = -1;
+    try { size = (await Bun.file(this.deltasPath).stat()).size; } catch { /* no tap file */ }
+    const growing = size >= 0 && this.lastSize >= 0 && size > this.lastSize;
+    this.lastSize = size;
+
+    if (growing && inWindow) {
+      this.streaming = true;
+      this.door.sendTypingChunk(this.idx++);
+    } else if (this.streaming) {
+      this.streaming = false;
+      this.door.sendTypingComplete(); // §14.3: complete on every exit path
+      this.idx = 0;
+    }
+  }
+}
+
 // ── downstream: Claude Code MCP channel server on stdio ─────────────────────
 
 class CcServer {
@@ -407,6 +472,12 @@ class CcServer {
 
 const door = new DoorClient();
 const cc = new CcServer(door);
+const typing = new TypingWatcher(door);
+{ // stamp the composing window on every wake (CcServer installed onWake first)
+  const inner = door.onWake;
+  door.onWake = (content, meta) => { typing.lastWakeTs = Date.now(); inner(content, meta); };
+}
+typing.start();
 void door.connect();
 
 const decoder = new TextDecoder();
