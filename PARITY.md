@@ -52,7 +52,14 @@ against the production door (first wake: Digi's "hesperus hi", 03:46Z).*
    `catch_up` tool covers the gap on the next session.
 4. **One world per process** (the token's world claim, default commons). The
    porch will want a second registration or a world param — later.
-5. **CC channel dialect is research-preview** — the load-bearing dependency we
+5. **`walk_to` blocks the whole tool lane** (door behavior, found first dogfood
+   night): the tool doesn't resolve until arrival (or ever, if the target left),
+   and the door serializes an agent's tool calls — so one walk wedges say/look
+   behind it until the connection drops. For the eventually-tell-antra list:
+   walk_to should resolve on PATH START (arrival is observable via events), or
+   the door should not serialize the lane. Adapter-side mitigation candidate:
+   per-call timeout is already 30s; consider fire-and-forget for walk_to.
+6. **CC channel dialect is research-preview** — the load-bearing dependency we
    don't control, flagged loudly in the file header. Failure mode: pushes stop
    silently, tools keep working.
 
@@ -92,6 +99,11 @@ voicing keyed off the token tap as today).
 - 03:44Z handshake: door negotiated mcpl 0.5, policy receipt accepted,
   `world:commons` registered, 31 tools listed, `look` returned live state.
 - 03:45Z say delivered ("said").
+- 04:14Z (dogfood night) **first wake through the resident session**:
+  Cormundus's walk-up (`eidoverse:approach`) arrived as a <channel> block
+  mid-task with 3 ambient lines folded — full production path, no test rig.
+  Also caught live: the tools/list race (fixed, cbd7a0e) and the walk_to
+  lane-block above.
 - 03:46Z **first live wake**: Digi said "hesperus hi" → arrived
   `chat:mention` → closure → `chat:addressed` → `notifications/claude/channel`
   with meta `{source:eidoverse, author:Digi, tags, addressed:true}`. Zero
