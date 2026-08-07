@@ -419,6 +419,7 @@ class LiveSay {
   armed = false;
   private pos = 0;
   private armTs = 0;
+  private lastMainActivity = 0;
   private lane: number | null = null;
   private latchTs = 0;
   private laneSeen = 0;
@@ -437,6 +438,16 @@ class LiveSay {
     this.armTs = Date.now();
     if (this.armed) return; // already live; new wake just extends the turn
     try { this.pos = (await Bun.file(this.deltasPath).stat()).size; } catch { return; }
+    // Defect G (06:22Z): a wake delivered MID-TURN must not arm — the
+    // running turn belongs to whoever started it (usually the tether), and
+    // arming here streams private prose into the room. Idle test: the last
+    // turn-end stamp must postdate the last main-lane activity we saw.
+    let stampM = 0;
+    try { stampM = (await Bun.file(this.turnEndStamp).stat()).mtime.getTime(); } catch { /* no stamp = fresh boot, allow */ }
+    if (this.lastMainActivity > 0 && this.lastMainActivity > stampM) {
+      dbg(`arm refused (${reason}): mid-turn delivery, current turn is not the wake's`);
+      return;
+    }
     this.armed = true;
     this.lane = null; this.laneOver = 0; this.buf = ""; this.raw = ""; this.inFence = false;
     dbg(`live lane ARMED (${reason})`);
@@ -497,8 +508,9 @@ class LiveSay {
       if (this.lane === null && ev.event === "ttft" &&
           /opus|fable/.test(String(ev.model ?? "")) && !ev.ghost) {
         this.lane = Number(ev.req); this.laneSeen = this.latchTs = Date.now();
+        this.lastMainActivity = Date.now();
       } else if (ev.req === this.lane) {
-        this.laneSeen = Date.now();
+        this.laneSeen = this.lastMainActivity = Date.now();
         if (ev.end) {
           this.flush(true); // a lane end is a spoken-phrase end — ship it
           this.lane = null; this.laneOver = Date.now();
