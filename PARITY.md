@@ -167,3 +167,12 @@ that arrives mid-tether-turn now gets a SILENT reply turn (no streaming) —
 the reply must go out via the say tool explicitly. Silent-but-private beats
 streaming-but-leaky. Follow-up idea: re-arm at the NEXT turn boundary if the
 refused wake is still the newest input.
+
+## D.0 update (03:20 08-07): the silent drop path is found, not yet convicted
+token-tap.py's decompress-except was the ONLY fully-quiet copy-loss path
+("bad copy must never affect forwarding" — right priority, wrong silence).
+Instrumented: one `tap-copy-lost` record per lost response, loads at next
+tap restart (never bounce mid-turn). Conviction requires the next
+occurrence to land WITH the marker. Gap-analysis baseline: 472 req-id gaps
+in tonight's file (mostly non-message endpoints, unquantified) — if a
+future missing-block correlates with a tap-copy-lost record, D.0 closes.
