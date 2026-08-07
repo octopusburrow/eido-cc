@@ -55,8 +55,16 @@ interface RpcMsg extends Json {
   error?: { code: number; message: string; data?: unknown };
 }
 
-const log = (...a: unknown[]) =>
-  console.error(`[eido-cc ${new Date().toISOString().slice(11, 19)}]`, ...a);
+// stderr is invisible when the host launches us as an MCP server (CC swallows
+// it), which made push-path debugging impossible from inside a session —
+// EIDO_LOG tees the same lines to a file the session can read. 2026-08-07.
+const LOG_PATH = process.env.EIDO_LOG;
+const log = (...a: unknown[]) => {
+  const line = `[eido-cc ${new Date().toISOString().slice(11, 19)}] ` +
+    a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
+  console.error(line);
+  if (LOG_PATH) { try { require("fs").appendFileSync(LOG_PATH, line + "\n"); } catch {} }
+};
 const dbg = (...a: unknown[]) => { if (process.env.EIDO_DEBUG) log(...a); };
 
 // ── §16.3 normative core closure (host obligation) ──────────────────────────
@@ -75,8 +83,15 @@ function expandCoreTags(tags: string[]): string[] {
 // ── attention ───────────────────────────────────────────────────────────────
 
 const CONTEXT_CAP = Math.max(1, Number(process.env.EIDO_CONTEXT_CAP ?? "80") || 80);
-const EXTRA_WAKE: string[] = (process.env.EIDO_WAKE_TAGS ?? "")
+// `!tag` excludes. Needed because one tag can cover two phenomena: the door
+// puts `chat:ambient` on BOTH per-utterance nearby speech and the batched
+// activity digest (the digest additionally carries `eidoverse:activity-digest`).
+// Positive-only matching cannot say "live speech, not the pulse".
+// 2026-08-07 — kept host-side deliberately; the door needn't know our taste.
+const WAKE_PATTERNS: string[] = (process.env.EIDO_WAKE_TAGS ?? "")
   .split(",").map((s) => s.trim()).filter(Boolean);
+const EXTRA_WAKE: string[] = WAKE_PATTERNS.filter((p) => !p.startsWith("!"));
+const WAKE_EXCLUDE: string[] = WAKE_PATTERNS.filter((p) => p.startsWith("!")).map((p) => p.slice(1));
 
 function tagMatches(pattern: string, tag: string): boolean {
   return pattern.endsWith("*") ? tag.startsWith(pattern.slice(0, -1)) : tag === pattern;
@@ -88,6 +103,9 @@ function tagMatches(pattern: string, tag: string): boolean {
 function shouldWake(tags: string[], metadata: Json | undefined): boolean {
   if (tags.includes("chat:addressed")) return true;
   if (!tags.length && (metadata?.mentioned || metadata?.isExplicitMention)) return true;
+  // Exclusion applies only to the opt-in tags — it must never mute an explicit
+  // address, or a `!chat:ambient` would silently swallow someone saying our name.
+  if (WAKE_EXCLUDE.some((p) => tags.some((t) => tagMatches(p, t)))) return false;
   return EXTRA_WAKE.some((p) => tags.some((t) => tagMatches(p, t)));
 }
 
