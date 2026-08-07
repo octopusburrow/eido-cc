@@ -59,13 +59,17 @@ against the production door (first wake: Digi's "hesperus hi", 03:46Z).*
    `catch_up` tool covers the gap on the next session.
 4. **One world per process** (the token's world claim, default commons). The
    porch will want a second registration or a world param — later.
-5. **`walk_to` blocks the whole tool lane** (door behavior, found first dogfood
-   night): the tool doesn't resolve until arrival (or ever, if the target left),
-   and the door serializes an agent's tool calls — so one walk wedges say/look
-   behind it until the connection drops. For the eventually-tell-antra list:
-   walk_to should resolve on PATH START (arrival is observable via events), or
-   the door should not serialize the lane. Adapter-side mitigation candidate:
-   per-call timeout is already 30s; consider fire-and-forget for walk_to.
+5. **RETRACTED, then upgraded**: "walk_to blocks the tool lane" was MY misuse
+   — the tool takes `{x, z}` coordinates and I passed `{target: "name"}`, so
+   the door ran `walkTo(NaN, NaN)`: a walk that never arrives, a body walking
+   in place for ten minutes (Digi noticed), and — the REAL door bugs the
+   mistake uncovered — (a) no input validation at the tool boundary, (b) the
+   NaN corrupted my persisted position, (c) `look` then CRASHED on the null
+   ("me.x.toFixed"). Chain for the antra list: validate x/z (reject NaN with
+   a §6.6 error), and make look robust to bad state. Recovery that worked:
+   `stop`, then walk_to with valid coords (snaps out of NaN). A `target:`
+   convenience param would also have prevented the whole class — the schema
+   invites it (face() takes target; walk_to doesn't).
 6. **CC channel dialect is research-preview** — the load-bearing dependency we
    don't control, flagged loudly in the file header. Failure mode: pushes stop
    silently, tools keep working.
