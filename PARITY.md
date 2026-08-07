@@ -152,3 +152,11 @@ voicing keyed off the token tap as today).
   ambient folded (quiet minute). The wake verifier being the same external
   integrator whose finds shaped the door's plain-MCP path is a nice bit of
   symmetry.
+
+## D.6 (defect F, fixed 23:19): Stop-hook $PPID is the hook's sh, not the session
+sid-match compared stamp-ppid to process.ppid — but hooks spawn under an
+intermediate shell, so every OWN stamp read as foreign (dots stuck to the
+10min cap). Fix lives in ~/.claude/settings.json: the hook now climbs the
+ancestry to the nearest `claude*` comm and stamps THAT pid, which is exactly
+what eido-cc's process.ppid returns. Verified: climb from a tool shell
+yields 277504 = the session pid.
