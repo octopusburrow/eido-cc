@@ -160,3 +160,10 @@ intermediate shell, so every OWN stamp read as foreign (dots stuck to the
 ancestry to the nearest `claude*` comm and stamps THAT pid, which is exactly
 what eido-cc's process.ppid returns. Verified: climb from a tool shell
 yields 277504 = the session pid.
+
+## D.7 (defect G, fixed 23:26): mid-turn wake armed the lane → tether prose leaked in-world
+Fix: arm refused unless idle (stamp > lastMainActivity). KNOWN TRADEOFF: a wake
+that arrives mid-tether-turn now gets a SILENT reply turn (no streaming) —
+the reply must go out via the say tool explicitly. Silent-but-private beats
+streaming-but-leaky. Follow-up idea: re-arm at the NEXT turn boundary if the
+refused wake is still the newest input.
