@@ -406,12 +406,13 @@ class TypingWatcher {
 class CcServer {
   private initialized = false;
   private queuedWakes: { content: string; meta: Record<string, string> }[] = [];
+  private pendingToolsList: (() => void)[] = [];
 
   constructor(private door: DoorClient) {
     door.onWake = (content, meta) => this.pushWake(content, meta);
     door.onToolsReady = () => {
-      // MCP: tell CC the tool list changed once the door's tools arrive
-      // (the door may connect after CC's first tools/list).
+      for (const answer of this.pendingToolsList.splice(0)) answer();
+      // belt-and-braces for any client that DOES honor it:
       if (this.initialized) this.notify("notifications/tools/list_changed", {});
     };
   }
@@ -449,9 +450,21 @@ class CcServer {
         log("CC session initialized (channel dialect declared)");
         for (const w of this.queuedWakes.splice(0)) this.pushWake(w.content, w.meta);
         break;
-      case "tools/list":
-        this.respond(msg.id, { tools: this.door.tools });
+      case "tools/list": {
+        // RACE FIX (2026-08-06, first dogfood session): CC connects in ~90ms
+        // and queries tools/list before the door handshake (~1-2s incl. token
+        // mint) completes — and it does NOT re-query on tools/list_changed.
+        // So: defer the response until the door's tools arrive (12s cap,
+        // then answer with whatever we have — possibly [] if the door is
+        // down, which is the honest answer).
+        if (this.door.tools.length > 0) { this.respond(msg.id, { tools: this.door.tools }); break; }
+        const id = msg.id;
+        let done = false;
+        const answer = () => { if (!done) { done = true; this.respond(id, { tools: this.door.tools }); } };
+        this.pendingToolsList.push(answer);
+        setTimeout(answer, 12_000);
         break;
+      }
       case "tools/call":
         void this.door.callTool(String(params.name), (params.arguments ?? {}) as Json)
           .then((result) => this.respond(msg.id, result))
