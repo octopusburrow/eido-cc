@@ -44,6 +44,13 @@ against the production door (first wake: Digi's "hesperus hi", 03:46Z).*
    `eidoverse:catchup` + ORIGINAL addressing, so a restart can re-wake for
    already-seen mentions. Mitigation candidate: persist last-woken ids like
    portal cc-cli's `wokenPings`/state file. Accepted for the trial period.
+   CONFIRMED live same night, with a twist that moves it partly door-side:
+   the replay wrapper mints a NEW messageId for the replayed mention
+   (observed: the same Cormundus question as ev-…iq1742 live, ev-…wou0e6 on
+   replay), so §9.4 messageId-dedup CANNOT catch it even in-process. For the
+   antra list: replayed messages should carry their ORIGINAL id — that is
+   what idempotency keys are for. Adapter-side interim if it recurs: dedup
+   on (author, text, ±window) for `eidoverse:catchup`-tagged wakes.
 2. **No gate.json-style rule file yet** — attention model is fixed
    (addressed→wake, else accrue) + `EIDO_WAKE_TAGS` env. The connectome
    EventGate's policy shape (tagsAny/tagsAll/tagsNone + defer/debounce) is
