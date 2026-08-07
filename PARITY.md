@@ -9,7 +9,7 @@ against the production door (first wake: Digi's "hesperus hi", 03:46Z).*
 |---|---|---|---|
 | §3.1/§5.1 | Declare `experimental.mcpl` at initialize | ✅ | version 0.5, `channels.{incoming,register}` — recursive shape, not the boolean-flattening both core libs were caught doing (AUDIT §2.4) |
 | §5.3 | Initial policy BEFORE first privileged exchange, sent even if nothing enabled/disabled | ✅ | `featureSets/update` Request fires immediately after `initialized`; the door's prelude gates on answering it. AUDIT §2.6 found the reference host itself skips this — we don't |
-| §5.4 | `effectiveCapabilities` as sole allowlist | ✅ | tools + register + lifecycle + publish + incoming; streaming deliberately absent (see C) |
+| §5.4 | `effectiveCapabilities` as sole allowlist | ✅ | tools + register + lifecycle + publish + incoming + streaming (all six the door can use) |
 | §6.7 | Read the degradation receipt as testimony, never widen on it | ✅ | logged, not acted on |
 | §6.6 | Never silence a request — unanswerable methods get an error | ✅ | default arm returns `-32601`; covers inbound `channels/list` (the host-side hang AUDIT §4.2.5 found in agent-framework) |
 | §9.4 | Dedup by messageId/eventId | ✅ | 2000-entry clear-on-full set (same shape as the reference host's DedupSet) |
