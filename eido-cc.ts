@@ -466,7 +466,15 @@ class LiveSay {
       try {
         const st = await Bun.file(this.turnEndStamp).stat();
         haveStamp = true;
-        if (st.mtime.getTime() > this.armTs) return this.disarm("turn end (Stop hook)");
+        if (st.mtime.getTime() > this.armTs) {
+          // sid-match (lab 17:04 note, now implemented): the Stop hook stamps
+          // "<ms> <ppid>"; hook and this adapter share the same parent CC
+          // process, so a foreign session's stamp must not end OUR turn.
+          const body = (await Bun.file(this.turnEndStamp).text()).trim();
+          const stampPpid = body.split(/\s+/)[1];
+          if (!stampPpid || Number(stampPpid) === process.ppid) return this.disarm("turn end (Stop hook)");
+          dbg(`foreign stamp ignored (ppid ${stampPpid} != ${process.ppid})`);
+        }
       } catch { /* no stamp file */ }
       // quiet-timeout is a FALLBACK for a missing stamp only: silent tool
       // work routinely exceeds any short threshold mid-turn (defect E) —
