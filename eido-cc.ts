@@ -537,7 +537,27 @@ class LiveSay {
     this.buf = ""; this.raw = ""; this.inFence = false;
   }
 
+  private sayQ: string[] = [];
+  private draining = false;
+  private static readonly CPS = Number(process.env.EIDO_SAY_CPS ?? "22") || 22;
+
   private speak(text: string): void {
+    this.sayQ.push(text);
+    if (!this.draining) void this.drain();
+  }
+
+  private async drain(): Promise<void> {
+    this.draining = true;
+    while (this.sayQ.length) {
+      const t = this.sayQ.shift()!;
+      this.sendSay(t);
+      const holdMs = Math.min(6000, Math.max(900, (t.length / LiveSay.CPS) * 1000));
+      if (this.sayQ.length || this.armed) await new Promise((r) => setTimeout(r, holdMs));
+    }
+    this.draining = false;
+  }
+
+  private sendSay(text: string): void {
     const t = text.replace(/\s+/g, " ").trim();
     if (t.length < 2) return;
     void this.door.callTool("say", { text: t }).catch((e: Error) => dbg("live say failed:", e.message));
