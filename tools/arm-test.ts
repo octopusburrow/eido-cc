@@ -14,6 +14,7 @@ class Lane {
   latchTs = 0;          // when the CURRENT main-lane turn latched
   lastMainActivity = 0;
   stampM = 0;           // turn-end stamp mtime
+  wakeM = 0;            // INVERTED STAMP: last time the world fed us
   now = 1000;
   log: string[] = [];
 
@@ -21,6 +22,12 @@ class Lane {
 
   /** A wake arrives from the door. */
   arm(reason: string) {
+    // inverted stamp: a turn that latched after the last wake is not ours
+    if (reason !== "eido_live" && this.latchTs > 0 && this.latchTs > this.wakeM) {
+      this.pendingWakeTs = this.now;          // defect B: its turn is still coming
+      this.log.push(`refused-outside(${reason})`);
+      return;
+    }
     if (this.armed) {
       // extend this turn AND grant one bounded follow-on (B), which end_turn
       // consumes exactly once (H: cannot be held open indefinitely).
@@ -29,7 +36,7 @@ class Lane {
     }
     // Defect G: a wake delivered mid-turn must not arm — that turn is the
     // tether's. Idle test: turn-end stamp must postdate main-lane activity.
-    if (this.lastMainActivity > 0 && this.lastMainActivity > this.stampM) {
+    if (reason !== "eido_live" && this.lastMainActivity > 0 && this.lastMainActivity > this.stampM) {
       this.pendingWakeTs = this.now;            // defect B: its turn IS queued
       this.log.push(`refused-pending(${reason})`);
       return;
@@ -38,6 +45,9 @@ class Lane {
     this.armed = true;
     this.log.push(`ARMED(${reason})`);
   }
+
+  /** The world delivers a wake — stamps that WE fed the session. */
+  pushWake() { this.wakeM = this.now; }
 
   /** The main lane starts producing tokens (a turn began). */
   latch() { this.latchTs = this.lastMainActivity = this.now; }
@@ -186,6 +196,54 @@ const ck = (n: string, got: unknown, want: unknown) => {
   L.tick(); L.arm("wake mid-tether-turn");      // refused → pending
   L.tick(); L.endTurn();
   ck("refused wake: lane not armed", L.armed, false);
+}
+
+// ── 9. INVERTED STAMP: a turn from outside the world never goes live ───────
+//    The rule the hooks could not express: cron, portal, Discord, GitHub and
+//    task notifications are all "outside", and enumerating them is a losing
+//    game. Stamp the ONE known-good source instead.
+{
+  const L = new Lane();
+  L.stampM = L.now;
+  L.tick(); L.pushWake();                 // world feeds us
+  L.tick(); L.arm("eido wake");
+  ck("wake-started turn arms", L.armed, true);
+  L.tick(); L.latch(); L.tick(); L.endTurn();
+
+  // now a CRON turn — no wake, no terminal typing, nothing UserPromptSubmit sees
+  L.tick(); L.stampM = L.now; L.tick(); L.latch();
+  L.tick(); L.arm("some other wake");
+  ck("cron/portal/task turn does NOT arm", L.armed, false);
+  ck("  ...refused as outside, not as mid-turn",
+     L.log.includes("refused-outside(some other wake)"), true);
+}
+
+// ── 9b. the case ONLY the inverted stamp catches ───────────────────────────
+//    A cron/portal/task turn that begins from a genuinely IDLE session: the
+//    turn-end stamp postdates the last main activity, so defect G's idle test
+//    sees "idle, fine to arm" and waves it through. Nothing about the input
+//    said "eidoverse" — only the absence of our own wake-stamp does.
+{
+  const L = new Lane();
+  L.tick(); L.pushWake();                 // a wake, long ago
+  L.tick(); L.arm("eido wake"); L.tick(); L.latch(); L.tick(); L.endTurn();
+  // The genuinely idle case: latch happens, THEN the turn-end stamp lands after
+  // it (a completed prior turn), so G's `lastMainActivity > stampM` is FALSE —
+  // it sees an idle session and waves the arm through. Only the missing
+  // wake-stamp distinguishes this cron turn from an eido one.
+  L.tick(); L.latch();                    // CRON turn latches
+  L.tick(); L.stampM = L.now;             // ...and a turn-end stamp postdates it
+  L.tick(); L.arm("cron wake");
+  ck("idle-start cron turn refused (stamp-only catch)", L.armed, false);
+}
+
+// ── 10. eido_live still overrides — the deliberate escape hatch ─────────────
+{
+  const L = new Lane();
+  L.stampM = 500;
+  L.tick(); L.latch();                    // a turn from outside is running
+  L.tick(); L.arm("eido_live");           // explicit call
+  ck("eido_live overrides the outside-turn refusal", L.armed, true);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

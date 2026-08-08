@@ -479,6 +479,9 @@ class LiveSay {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly deltasPath = process.env.EIDO_DELTAS ?? "/tmp/hesperus-deltas.jsonl";
   private readonly turnEndStamp = "/tmp/hesperus-turn-end";
+  /** Written by pushWake: the last moment the WORLD fed this session. A turn
+   *  whose latch postdates this did not start in eido — see LANE-DESIGN.md. */
+  private readonly wakeStamp = "/tmp/hesperus-eido-wake";
   private readonly enabled = process.env.EIDO_LIVE !== "0";
 
   constructor(private door: DoorClient) {}
@@ -525,7 +528,21 @@ class LiveSay {
     // turn-end stamp must postdate the last main-lane activity we saw.
     let stampM = 0;
     try { stampM = (await Bun.file(this.turnEndStamp).stat()).mtime.getTime(); } catch { /* no stamp = fresh boot, allow */ }
-    if (this.lastMainActivity > 0 && this.lastMainActivity > stampM) {
+    // Inverted-stamp check (LANE-DESIGN.md): if the main lane latched AFTER
+    // the last wake we delivered, this turn came from somewhere else — the
+    // tether, cron, portal, a task notification — and must not go live, no
+    // matter which of those it was.
+    let wakeM = 0;
+    try { wakeM = (await Bun.file(this.wakeStamp).stat()).mtime.getTime(); } catch { /* never woken yet */ }
+    if (reason !== "eido_live tool" && this.latchTs > 0 && this.latchTs > wakeM) {
+      // Refused for THIS turn — but the wake still has a turn coming (defect B),
+      // so record it exactly as the mid-turn path does. Returning before this
+      // was a regression that re-silenced the queued reply.
+      this.pendingWakeTs = Date.now();
+      dbg(`arm refused (${reason}): turn started outside the world (latch ${this.latchTs} > wake ${wakeM})`);
+      return "not armed: this turn began outside the eidoverse — queued for the next turn; eido_live to speak here anyway";
+    }
+    if (reason !== "eido_live tool" && this.lastMainActivity > 0 && this.lastMainActivity > stampM) {
       // Refused for THIS turn (G) — but CC has queued a turn for this wake, and
       // muting that one is defect B (sill's 05:44 hello, whole reply silent).
       // Record it as pending: it arms when the current turn ends, not now.
@@ -718,6 +735,16 @@ class CcServer {
   /** ⚠️ The channel-dialect dependency, part (b) — see file header. */
   private pushWake(content: string, meta: Record<string, string>): void {
     if (!this.initialized) { this.queuedWakes.push({ content, meta }); return; }
+    // INVERTED STAMP (R, 2026-08-07 23:57): record that the WORLD fed this
+    // session. The lane rule is "live only if the turn STARTED in eido", and
+    // the complement — any input from outside the world — cannot be enumerated
+    // by hooks: UserPromptSubmit catches the human typing but not cron, portal,
+    // Discord, GitHub notifications or task completions. Stamping the one
+    // known-good source instead means every new channel is handled correctly by
+    // default. A turn whose start postdates this stamp did not come from us.
+    try {
+      require("fs").writeFileSync("/tmp/hesperus-eido-wake", `${Date.now()} ${process.ppid}\n`);
+    } catch { /* stamp is advisory; never let it block a wake */ }
     this.notify("notifications/claude/channel", { content, meta });
   }
 
