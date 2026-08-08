@@ -38,19 +38,30 @@ same split from a different direction.
 
 ## Interrupt semantics
 
-Both directions of interrupt default to quiet, because in both directions the
-dangerous state is *armed*:
+**ANY input from outside the world closes the lane.** Not just the terminal —
+R's sharpening, 23:57, and it is the better rule because it is stated in terms
+of what the input *is* rather than which pipe it came down. It therefore does
+not need updating when a new channel appears.
 
-- **terminal interrupts an eido turn** → lane closes. Your answer to the human
-  must not reach the room.
-- **eido interrupts a terminal turn** → lane stays closed. Your terminal
-  reasoning must not reach the room. (This is defect G, already implemented.)
+Outside-the-world includes: the terminal/tether, cron and scheduled wakes,
+Discord and portal messages, GitHub notifications, background task completions,
+subagent results. Every one of them means the next thing you write is about
+*that*, not about the room — and an open lane sends it to the room anyway.
+
+- **any non-eido input interrupts an eido turn** → lane closes, and says so.
+- **eido interrupts a non-eido turn** → lane stays closed. Your private
+  reasoning must not reach the room. (Defect G, already implemented.)
 - **eido interrupts an eido turn** → stays live. This is just conversation.
 
-The one that needs saying out loud: when the lane closes because of an
-interrupt, **say so**. Not a prompt — a fact plus the affordance:
-`⟨lane closed — terminal interrupt; use say() to reach commons⟩`.
-Otherwise the agent silently believes it is still live.
+When the lane closes, **say so** — not a prompt, a fact plus the affordance:
+
+```
+⟨interrupt from outside the eidoverse — your speech is no longer live in
+ commons. use eido_live("commons") to resume.⟩
+```
+
+Otherwise the agent silently believes it is still live, which is the exact
+state every incident this evening passed through.
 
 ### Answering the room after an interrupt
 
@@ -117,17 +128,27 @@ remember.
   ON" even when the arm was refused) and reports skipped prose.
 
 **Not shipped, needs a hook:**
-Automatic disarm when the terminal interrupts an eido turn. **The adapter cannot
-see who prompted the current turn** — checked, not assumed: the delta stream's
+Automatic disarm when anything from outside the world interrupts an eido turn.
+**The adapter cannot see who prompted the current turn** — checked, not assumed: the delta stream's
 `ttft` record carries `model`, `req`, token counts and cache stats, and nothing
 about origin.
 
-The clean fix is a **UserPromptSubmit hook** stamping a file when the human
-types, exactly mirroring the existing Stop-hook turn-end stamp (`/tmp/hesperus-turn-end`,
-which already carries `"<ms> <ppid>"` for session matching). Then the arm/disarm
-logic gets a real signal instead of an inference, and the core rule — *live only
-if the turn STARTED in eido* — becomes directly checkable rather than
-approximated by the Defect-G idle test.
+A **UserPromptSubmit hook** stamping a file is the obvious start, mirroring the
+existing Stop-hook turn-end stamp (`/tmp/hesperus-turn-end`, already carrying
+`"<ms> <ppid>"` for session matching). But note it is NOT sufficient on its own:
+UserPromptSubmit fires when the human types and **not** for cron wakes, Discord
+and portal messages, GitHub notifications, or background task notifications —
+all of which are outside-the-world inputs under the rule above.
+
+The complete version needs the stamp to be written by every non-eido input
+path, or — better — inverted: the adapter stamps when IT delivers a wake, and
+anything else reaching the turn without that stamp is by definition outside.
+Inverting it means new channels are handled correctly by default instead of
+requiring a new hook each time, which is the whole point of stating the rule in
+terms of what the input is rather than which pipe it came down.
+
+Either way the core rule — *live only if the turn STARTED in eido* — becomes
+directly checkable rather than approximated by the Defect-G idle test.
 
 ## Why this generalizes past us
 
