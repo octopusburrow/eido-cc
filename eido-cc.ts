@@ -468,6 +468,7 @@ class LiveSay {
   armed = false;
   private pos = 0;
   private armTs = 0;
+  private pendingWakeTs = 0;   // a wake ACCEPTED for a future turn (defect H)
   private lastMainActivity = 0;
   private lane: number | null = null;
   private latchTs = 0;
@@ -484,8 +485,29 @@ class LiveSay {
 
   async arm(reason: string): Promise<void> {
     if (!this.enabled) return;
-    this.armTs = Date.now();
-    if (this.armed) return; // already live; new wake just extends the turn
+    // Defect H (2026-08-07 22:5xZ, R): armTs used to be stamped HERE,
+    // unconditionally — before both the already-armed return and the Defect-G
+    // refusal below. So a wake that got REFUSED still moved armTs, and the
+    // end_turn check (`armTs > latchTs` = "a wake is queued, stay armed") then
+    // read a refusal as a queued wake and stayed live into the NEXT turn —
+    // which is usually the tether's, with no eido ping. That is the "it keeps
+    // putting my lines out live no matter whether eido pinged me" symptom.
+    //
+    // The defect was one variable doing two jobs. Split them: armTs = when we
+    // armed (extended by an ACCEPTED wake); pendingWakeTs = a wake accepted
+    // for a FUTURE turn, which is the only thing that should keep us armed
+    // across an end_turn.
+    if (this.armed) {
+      // Live already. The wake extends THIS turn — and CC may ALSO have queued
+      // a separate turn for it (defect B: sill's hello went silent when we
+      // muted that one). We cannot tell from the delta stream which happened;
+      // it carries stop=end_turn/tool_use but nothing about queued turns.
+      // So: grant exactly ONE follow-on turn, then release. Bounded, so a busy
+      // room cannot hold the lane open indefinitely (defect H).
+      this.armTs = Date.now();
+      this.pendingWakeTs = Date.now();
+      return;
+    }
     try { this.pos = (await Bun.file(this.deltasPath).stat()).size; } catch { return; }
     // Defect G (06:22Z): a wake delivered MID-TURN must not arm — the
     // running turn belongs to whoever started it (usually the tether), and
@@ -494,9 +516,14 @@ class LiveSay {
     let stampM = 0;
     try { stampM = (await Bun.file(this.turnEndStamp).stat()).mtime.getTime(); } catch { /* no stamp = fresh boot, allow */ }
     if (this.lastMainActivity > 0 && this.lastMainActivity > stampM) {
-      dbg(`arm refused (${reason}): mid-turn delivery, current turn is not the wake's`);
+      // Refused for THIS turn (G) — but CC has queued a turn for this wake, and
+      // muting that one is defect B (sill's 05:44 hello, whole reply silent).
+      // Record it as pending: it arms when the current turn ends, not now.
+      this.pendingWakeTs = Date.now();
+      dbg(`arm refused (${reason}): mid-turn — pending for the next turn`);
       return;
     }
+    this.armTs = Date.now();
     this.armed = true;
     this.lane = null; this.laneOver = 0; this.buf = ""; this.raw = ""; this.inFence = false;
     dbg(`live lane ARMED (${reason})`);
@@ -510,6 +537,7 @@ class LiveSay {
   }
 
   disarm(reason: string): void {
+    this.pendingWakeTs = 0;      // never let a stale pending wake resurrect us
     if (!this.armed) return;
     this.flush(true);
     this.armed = false;
@@ -564,10 +592,16 @@ class LiveSay {
           this.flush(true); // a lane end is a spoken-phrase end — ship it
           this.lane = null; this.laneOver = Date.now();
           if (ev.stop === "end_turn") {
-            // a wake that arrived MID-turn re-extended armTs; that turn is
-            // already queued in CC — stay armed for it instead of muting it
-            // (defect B, first hit: sill's 05:44 hello, whole reply silent)
-            if (this.armTs > this.latchTs) { dbg("end_turn but newer wake queued — staying armed"); continue; }
+            // Stay armed ONLY for a wake genuinely accepted for a future turn
+            // (defect B: sill's 05:44 hello, whole reply silent). Previously
+            // this read `armTs > latchTs`, which a REFUSED mid-turn wake also
+            // satisfied — defect H, staying live into the tether's next turn.
+            if (this.pendingWakeTs > this.latchTs) {
+              this.pendingWakeTs = 0;
+              this.armTs = Date.now();   // the queued wake's turn starts now
+              dbg("end_turn but a wake is queued — staying armed for it");
+              continue;
+            }
             return this.disarm("end_turn");
           }
         } else if (typeof ev.text === "string") {
