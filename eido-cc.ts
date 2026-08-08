@@ -483,8 +483,13 @@ class LiveSay {
 
   constructor(private door: DoorClient) {}
 
-  async arm(reason: string): Promise<void> {
-    if (!this.enabled) return;
+  /** Returns a short human note about what arming did — notably how much
+   *  already-written prose was SKIPPED. Re-arming mid-turn sets pos to the
+   *  current end of the delta file, so anything written before the call is
+   *  never spoken; silently dropping it made the boundary invisible exactly
+   *  when it mattered (R, 2026-08-07). Skip is right; skip-and-say is honest. */
+  async arm(reason: string): Promise<string> {
+    if (!this.enabled) return "live lane is disabled (EIDO_LIVE=0)";
     // Defect H (2026-08-07 22:5xZ, R): armTs used to be stamped HERE,
     // unconditionally — before both the already-armed return and the Defect-G
     // refusal below. So a wake that got REFUSED still moved armTs, and the
@@ -506,9 +511,14 @@ class LiveSay {
       // room cannot hold the lane open indefinitely (defect H).
       this.armTs = Date.now();
       this.pendingWakeTs = Date.now();
-      return;
+      return "already live — this wake extends the current turn";
     }
-    try { this.pos = (await Bun.file(this.deltasPath).stat()).size; } catch { return; }
+    let skipped = 0;
+    try {
+      const size = (await Bun.file(this.deltasPath).stat()).size;
+      skipped = Math.max(0, size - this.pos);   // prose written before this arm
+      this.pos = size;
+    } catch { return "could not read the delta stream — lane not armed"; }
     // Defect G (06:22Z): a wake delivered MID-TURN must not arm — the
     // running turn belongs to whoever started it (usually the tether), and
     // arming here streams private prose into the room. Idle test: the last
@@ -521,13 +531,16 @@ class LiveSay {
       // Record it as pending: it arms when the current turn ends, not now.
       this.pendingWakeTs = Date.now();
       dbg(`arm refused (${reason}): mid-turn — pending for the next turn`);
-      return;
+      return "not armed: this turn belongs to the terminal; queued for the next one";
     }
     this.armTs = Date.now();
     this.armed = true;
     this.lane = null; this.laneOver = 0; this.buf = ""; this.raw = ""; this.inFence = false;
     dbg(`live lane ARMED (${reason})`);
     this.timer = setInterval(() => void this.tick(), 300);
+    return skipped > 0
+      ? `live — NOTE: ~${skipped} bytes of prose written earlier this turn were NOT sent (use say() to repeat anything that mattered)`
+      : "live";
   }
 
   goPrivate(): void {
@@ -752,8 +765,13 @@ class CcServer {
           break;
         }
         if (name === "eido_live") {
-          void this.liveSay?.arm("eido_live tool");
-          this.respond(msg.id, { content: [{ type: "text", text: "live lane ON — your prose now streams to the world as speech until this turn ends (fenced blocks stay silent)" }] });
+          // Await it: arm() reports whether it actually armed and how much
+          // already-written prose it skipped. Fire-and-forget answered "ON"
+          // even when the arm was refused, which is the lie this fixes.
+          void (this.liveSay?.arm("eido_live tool") ?? Promise.resolve("no live lane"))
+            .then((note) => this.respond(msg.id, { content: [{ type: "text",
+              text: `${note}${note.startsWith("live") ? " — prose streams to the world as speech until this turn ends (fenced blocks stay silent)" : ""}` }] }))
+            .catch((e: Error) => this.respond(msg.id, { content: [{ type: "text", text: `live lane failed: ${e.message}` }] }));
           break;
         }
         void this.door.callTool(String(params.name), (params.arguments ?? {}) as Json)
