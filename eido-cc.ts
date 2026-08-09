@@ -418,7 +418,7 @@ export class DoorClient {
 
 // The two conveniences live in their own file so this one reads as plain MCPL.
 // See eido-cc-extras.ts — delete it and the wire-up in main() for stock behaviour.
-import { TypingWatcher, LiveSay, LOCAL_TOOLS } from "./eido-cc-extras.ts";
+import { TypingWatcher, LiveSay, LOCAL_TOOLS, localToolHandlers } from "./eido-cc-extras.ts";
 
 // ── downstream: Claude Code MCP channel server on stdio ─────────────────────
 
@@ -430,8 +430,10 @@ class CcServer {
   /** Deviation hook. Typed as a plain callback so the core never names an
    *  extras class — delete eido-cc-extras.ts and this stays valid. */
   onAgentNote: ((text: string) => void) | null = null;
-  onGoPrivate: (() => void) | null = null;
-  onGoLive: (() => Promise<string>) | null = null;
+  /** name -> handler, supplied by a deviation. Empty in stock builds. */
+  localTools: Record<string, () => Promise<string>> | null = null;
+  /** Extra tool declarations spliced onto tools/list. Empty in stock builds. */
+  extraTools: unknown[] = [];
 
   constructor(private door: DoorClient) {
     door.onWake = (content, meta) => this.pushWake(content, meta);
@@ -498,7 +500,7 @@ class CcServer {
         // So: defer the response until the door's tools arrive (12s cap,
         // then answer with whatever we have — possibly [] if the door is
         // down, which is the honest answer).
-        const withLocal = () => [...this.door.tools, ...LOCAL_TOOLS];
+        const withLocal = () => [...this.door.tools, ...this.extraTools];
         if (this.door.tools.length > 0) { this.respond(msg.id, { tools: withLocal() }); break; }
         const id = msg.id;
         let done = false;
@@ -509,19 +511,15 @@ class CcServer {
       }
       case "tools/call": {
         const name = String(params.name);
-        if (name === "eido_out") {
-          this.onGoPrivate?.();
-          this.respond(msg.id, { content: [{ type: "text", text: "live lane off for this turn — prose is private again" }] });
-          break;
-        }
-        if (name === "eido_live") {
-          // Await it: arm() reports whether it actually armed and how much
-          // already-written prose it skipped. Fire-and-forget answered "ON"
-          // even when the arm was refused, which is the lie this fixes.
-          void (this.onGoLive?.() ?? Promise.resolve("no live lane"))
-            .then((note) => this.respond(msg.id, { content: [{ type: "text",
-              text: `${note}${note.startsWith("live") ? " — prose streams to the world as speech until this turn ends (fenced blocks stay silent)" : ""}` }] }))
-            .catch((e: Error) => this.respond(msg.id, { content: [{ type: "text", text: `live lane failed: ${e.message}` }] }));
+        // Locally-handled tools, if any deviation registered one. Stock has
+        // none and every name falls through to the door below.
+        const local = this.localTools?.[name];
+        if (local) {
+          void local()
+            .then((text) => this.respond(msg.id, { content: [{ type: "text", text }] }))
+            .catch((e: Error) => this.respond(msg.id, {
+              content: [{ type: "text", text: `Error: ${e.message}` }], isError: true,
+            }));
           break;
         }
         void this.door.callTool(String(params.name), (params.arguments ?? {}) as Json)
@@ -550,8 +548,8 @@ const typing = new TypingWatcher(door);
 const liveSay = new LiveSay(door);
 cc.onAgentNote = (t) => cc.agentNote(t);
 liveSay.onAgentNote = (t) => cc.agentNote(t);
-cc.onGoPrivate = () => liveSay.goPrivate();
-cc.onGoLive = () => liveSay.arm("eido_live tool");
+cc.localTools = localToolHandlers(liveSay);
+cc.extraTools = LOCAL_TOOLS;
 typing.liveSay = liveSay;
 { // stamp the composing window + arm the live lane on every wake
   const inner = door.onWake;

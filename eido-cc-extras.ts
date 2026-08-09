@@ -512,7 +512,24 @@ export class LiveSay {
   }
 }
 
-/** The two lane verbs. EXPORTED because eido-cc.ts's tools/list splices them
+/** ── WHERE THE DEVIATION TOUCHES THE CORE ────────────────────────────────
+ *  Everything in this file reaches eido-cc.ts through exactly three seams, all
+ *  inside the fenced "OUR WIRE-UP" block at the bottom of that file:
+ *
+ *    LOCAL_TOOLS         spliced onto tools/list  (eido-cc.ts, `withLocal`)
+ *    localToolHandlers() assigned to cc.localTools — the core dispatches by
+ *                        name and never mentions eido_live / eido_out
+ *    liveSay.onAgentNote assigned to cc.agentNote — how a disarm reaches the
+ *                        agent's context
+ *
+ *  The core declares those as plain data/callbacks (`localTools`, `agentNote`,
+ *  `onAgentNote`) and names no type from this file. Delete eido-cc-extras.ts
+ *  and the wire-up block and what remains is a conforming MCPL host — that
+ *  claim is now literally true rather than aspirational (it was not before
+ *  2026-08-08: CcServer carried a LiveSay-typed field and the tools/call switch
+ *  hardcoded both verb names).
+ *
+ *  The two lane verbs. EXPORTED because eido-cc.ts's tools/list splices them
  *  onto the door's tools — the 08-07 split moved this definition here and left
  *  that reference behind, so every tools/list threw ReferenceError until a live
  *  connection to a test door surfaced it. Nothing in the unit suites calls
@@ -521,3 +538,29 @@ export const LOCAL_TOOLS = [
   { name: "eido_out", description: "Leave the live lane for the current turn: your prose stops streaming to the world as speech (it auto-armed because this turn began from an addressed wake). Actions/tools are unaffected. Use when a wake turn needs private work narration.", inputSchema: { type: "object", properties: {} } },
   { name: "eido_live", description: "Manually enter the live lane for this turn: from now until the turn ends, your prose streams into the world as sentence-chunked speech. Fenced code blocks stay silent.", inputSchema: { type: "object", properties: {} } },
 ];
+
+/** Handlers for LOCAL_TOOLS, so the core's tools/call switch does not have to
+ *  name a deviation. The core looks the tool up here BEFORE forwarding to the
+ *  door; if this file is deleted the map goes with it and every tool falls
+ *  through to the door, which is stock behaviour.
+ *
+ *  Each handler returns the text to answer with. Wire-up lives in eido-cc.ts
+ *  under "OUR WIRE-UP" — it binds these to the LiveSay instance, because the
+ *  map itself must stay free of any instance the core would have to hold. */
+export function localToolHandlers(liveSay: LiveSay): Record<string, () => Promise<string>> {
+  return {
+    eido_out: async () => {
+      liveSay.goPrivate();
+      return "live lane off for this turn — prose is private again";
+    },
+    // Awaited, not fire-and-forget: arm() reports whether it ACTUALLY armed and
+    // how much already-written prose it skipped. The old fire-and-forget path
+    // answered "ON" even when the arm was refused, which is the lie this fixes.
+    eido_live: async () => {
+      const note = await liveSay.arm("eido_live tool");
+      return note + (note.startsWith("live")
+        ? " — prose streams to the world as speech until this turn ends (fenced blocks stay silent)"
+        : "");
+    },
+  };
+}
