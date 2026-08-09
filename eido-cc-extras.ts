@@ -1,5 +1,5 @@
 import type { DoorClient } from "./eido-cc.ts";
-import { log, dbg } from "./eido-cc.ts";
+import { log, dbg } from "./eido-cc-log.ts";
 
 /**
  * eido-cc-extras — OUR conveniences. NOT part of MCPL, NOT what the door expects.
@@ -249,7 +249,13 @@ export class LiveSay {
     // prose believing the room can hear, and the room goes quiet mid-thought
     // (R, 2026-08-08). Anything that is not an explicit eido_out or the
     // ordinary end of a turn gets a line injected saying so.
-    if (reason !== "eido_out tool" && !reason.startsWith("turn end") && reason !== "end_turn") {
+    // ONLY an interruption is worth a line. eido_out is the agent's own call;
+    // turn-end/quiet/cap are the lane expiring normally. Notifying on those
+    // would put a reminder in front of the agent on turns that have nothing to
+    // do with the world, which is exactly the spam R ruled out (2026-08-08).
+    const wasInterrupted = reason.startsWith("interrupted by") ||
+                           reason.startsWith("input from outside");
+    if (wasInterrupted) {
       this.notifyAgent(
         `[live lane OFF — ${reason}] Your prose is no longer streaming to the ` +
         `eidoverse. Call eido_live to re-arm for this turn, or say() to speak ` +
@@ -376,18 +382,106 @@ export class LiveSay {
       this.buf += this.raw.slice(0, -2);
       this.raw = this.raw.slice(-2);
     }
-    // sentence boundaries → say (porch token-router chunking, simplified)
-    let m: RegExpMatchArray | null;
-    while ((m = this.buf.match(/^([\s\S]{8,}?[.!?…](?=\s|$))\s*/))) {
-      this.speak(m[1]);
-      this.buf = this.buf.slice(m[0].length);
+    // Sentence boundaries → say. This is the porch token-router aggregator
+    // (tools/token-router/aggregate.py), ported rather than approximated: the
+    // "simplified" version that used to live here split on every [.!?] with no
+    // abbreviation guard, no lookahead and no clause handling, which is why a
+    // reply came out of the room as overlapping fragments (R, 2026-08-08).
+    for (const chunk of this.nextChunks()) this.speak(chunk);
+  }
+
+
+  // ── porch token-router aggregation ───────────────────────────────────────
+  // Ported from tools/token-router/aggregate.py. Constants are MEASURED, not
+  // guessed (porch, 2026-07-25): a real turn opened with a 152-char sentence =
+  // ~5s of unbroken speech before the first natural pause, so soft clause
+  // splitting past 90 chars exists to give the voice somewhere to breathe.
+  private static readonly ABBREVS = new Set([
+    "mr","mrs","ms","dr","prof","sr","jr","st","mt","ft",
+    "vs","etc","eg","e.g","ie","i.e","cf","ca","approx",
+    "no","vol","fig","dept","est","min","max","misc",
+    "jan","feb","mar","apr","jun","jul","aug","sep","sept","oct","nov","dec",
+  ]);
+  private static readonly BOUNDARY = /[.!?…]+["')\]»]*\s/g;
+  // Strong punctuation first, then coordinating conjunctions — R, 2026-07-25:
+  // "'and' is a natural cadence/tone change spot too". The conjunction form
+  // needs a leading space (split BEFORE the word) and a trailing one (so it
+  // does not fire inside "android").
+  private static readonly SOFT =
+    /(?:[,;:—–]["')\]»]*\s)|(?:\s(?=(?:and|but|so|or|yet|because|which|while|though|although)\s))/g;
+  private static readonly MIN_LEN = 20;    // shorter than this = fragment, glue on
+  private static readonly LOOKAHEAD = 6;   // wait: the next delta may unmask a false split
+  private static readonly SOFT_LEN = 90;   // only clause-split past this
+  private static readonly SOFT_MIN = 35;   // ...and never leave a stub shorter
+
+  /** False after abbreviations and initials. Decimals never reach here: the
+   *  boundary regex requires whitespace after the dot. */
+  private isRealBoundary(upto: number): boolean {
+    const head = this.buf.slice(0, upto).replace(/\s+$/, "").replace(/[.!?…"')\]»]+$/, "");
+    const last = head.trim() ? head.trim().split(/\s+/).pop()! : "";
+    if (LiveSay.ABBREVS.has(last.toLowerCase().replace(/\.+$/, ""))) return false;
+    if (last.length === 1 && /[A-Z]/.test(last)) return false;   // "J. R. R. Tolkien"
+    return true;
+  }
+
+  /** Break one overlong sentence at clause boundaries. Applied to a sentence we
+   *  are ABOUT to emit, never to the live buffer — the hard boundary usually
+   *  arrives in the same delta that makes the buffer overlong, so a
+   *  buffer-level soft split would almost never get a turn (two wrong fixes
+   *  chased that on 2026-07-25 before it was traced). */
+  private splitLong(sentence: string): string[] {
+    if (sentence.length <= LiveSay.SOFT_LEN) return [sentence];
+    const chunks: string[] = [];
+    let rest = sentence;
+    while (rest.length > LiveSay.SOFT_LEN) {
+      let best: RegExpExecArray | null = null;
+      LiveSay.SOFT.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = LiveSay.SOFT.exec(rest))) {
+        const end = m.index + m[0].length;
+        if (end < LiveSay.SOFT_MIN) continue;                 // stub would be a fragment
+        if (rest.length - end < LiveSay.SOFT_MIN) break;      // remainder would be
+        best = m;
+      }
+      if (!best) break;                                       // no usable break: speak whole
+      const end = best.index + best[0].length;
+      chunks.push(rest.slice(0, end).trim());
+      rest = rest.slice(end);
     }
-    if (this.buf.length > 400) { this.speak(this.buf); this.buf = ""; } // runaway clause
+    if (rest.trim()) chunks.push(rest.trim());
+    return chunks;
+  }
+
+  /** Drain every complete sentence currently in the buffer. */
+  private nextChunks(): string[] {
+    const out: string[] = [];
+    for (;;) {
+      let found = -1;
+      LiveSay.BOUNDARY.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = LiveSay.BOUNDARY.exec(this.buf))) {
+        const end = m.index + m[0].length;
+        if (!this.isRealBoundary(end)) continue;
+        if (this.buf.slice(0, end).trim().length < LiveSay.MIN_LEN) continue;
+        if (this.buf.length - end < LiveSay.LOOKAHEAD) return out;   // wait for more
+        found = end;
+        break;
+      }
+      if (found < 0) return out;
+      const sentence = this.buf.slice(0, found).trim();
+      this.buf = this.buf.slice(found);
+      out.push(...this.splitLong(sentence));
+    }
   }
 
   flush(force: boolean): void {
     if (!this.inFence) this.buf += this.raw; // tail carry belongs to the phrase
-    if (force && this.buf.trim().length > 1) this.speak(this.buf);
+    // Clause-split the tail too: a forced flush at turn-end is exactly where a
+    // long unpunctuated remainder lands, and shipping it whole is the 5-second
+    // unbroken utterance the soft rules exist to prevent.
+    if (force && this.buf.trim().length > 1) {
+      for (const c of this.splitLong(this.buf.trim())) this.speak(c);
+    }
     this.buf = ""; this.raw = ""; this.inFence = false;
   }
 

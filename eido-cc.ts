@@ -78,14 +78,8 @@ interface RpcMsg extends Json {
 // stderr is invisible when the host launches us as an MCP server (CC swallows
 // it), which made push-path debugging impossible from inside a session —
 // EIDO_LOG tees the same lines to a file the session can read. 2026-08-07.
-const LOG_PATH = process.env.EIDO_LOG;
-export const log = (...a: unknown[]) => {
-  const line = `[eido-cc ${new Date().toISOString().slice(11, 19)}] ` +
-    a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
-  console.error(line);
-  if (LOG_PATH) { try { require("fs").appendFileSync(LOG_PATH, line + "\n"); } catch {} }
-};
-export const dbg = (...a: unknown[]) => { if (process.env.EIDO_DEBUG) log(...a); };
+export { log, dbg } from "./eido-cc-log.ts";
+import { log, dbg } from "./eido-cc-log.ts";
 
 // ── §16.3 normative core closure (host obligation) ──────────────────────────
 // chat:mention ⇒ chat:addressed; chat:reply ⇒ chat:addressed;
