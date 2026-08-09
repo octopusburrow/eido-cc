@@ -144,6 +144,12 @@ export class LiveSay {
   private lastMainActivity = 0;
   private lane: number | null = null;
   private latchTs = 0;
+  /** The previous lane ended in `tool_use`, i.e. I am mid-turn and about to
+   *  continue. The NEXT lane to latch is therefore mine, not a foreign input.
+   *  Without this the two are indistinguishable — see continuesMyTurn below. */
+  private toolContinuation = false;
+  /** Prose composed before a tool call, held rather than discarded. */
+  private pendingSpeech = "";
   private laneSeen = 0;
   private laneOver = 0;
   private buf = "";
@@ -251,6 +257,17 @@ export class LiveSay {
     this.flush(true);
     this.armed = false;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    // 🔴 SPEAK WHAT WAS ALREADY COMPOSED BEFORE GOING QUIET (R, 2026-08-09).
+    // A foreign interrupt ends the lane, but prose written BEFORE it was
+    // addressed to the room and should land: "you should finish your eido line
+    // without getting cut off". Ship the held buffer on the way out — the one
+    // exception being an eido interrupt, which is the room itself talking over
+    // me and is allowed to cut through (handled at the call site).
+    if (this.pendingSpeech || this.buf || this.raw) {
+      if (this.pendingSpeech) this.buf = this.pendingSpeech + this.buf;
+      this.pendingSpeech = "";
+      try { this.flush(true); } catch (e) { dbg(`final flush failed: ${e}`); }
+    }
     dbg(`live lane disarmed (${reason})`);
     // A disarm the agent did not ask for is INVISIBLE to it — it keeps writing
     // prose believing the room can hear, and the room goes quiet mid-thought
@@ -267,6 +284,41 @@ export class LiveSay {
         `[live lane OFF — ${reason}] Your prose is no longer streaming to the ` +
         `eidoverse. Call eido_live to re-arm for this turn, or say() to speak ` +
         `one line without re-arming.`);
+    }
+  }
+
+  /** A lane ended in `tool_use`: I am mid-turn and coming straight back.
+   *
+   *  Two things happen, and they used to be one destructive line:
+   *  - mark the NEXT lane as mine, so tick() does not read my own tool call as
+   *    a foreign interrupt and kick me out of the room (R, 2026-08-09);
+   *  - HOLD the prose rather than deleting it. Work narration is still not
+   *    speech, but words already composed for the room must not die because a
+   *    tool call happened to follow them.
+   *
+   *  Extracted as a method so the tests drive this code instead of a copy of
+   *  it — the old suite re-implemented this branch inline and therefore stayed
+   *  green while the real behaviour changed. */
+  holdForToolCall(): void {
+    this.toolContinuation = true;
+    // 🔴 `buf` is the pending SPEECH; `raw` is only a 2-char fence-lookahead
+    // tail. I captured `raw` first and the test caught it — "already written"
+    // came back as "en". Hold both, in order, so a sentence split across the
+    // boundary survives intact.
+    this.pendingSpeech = this.buf + this.raw;
+    this.buf = ""; this.raw = ""; this.inFence = false;
+    dbg(`lane ended in tool_use — holding ${this.pendingSpeech.length} chars`);
+  }
+
+  /** A new lane latched. Spend the continuation excuse (it covers exactly one
+   *  lane) and either resume the held sentence or, if this is genuinely a new
+   *  turn, ship what the previous one left behind rather than lose it. */
+  consumeLatch(): void {
+    if (this.toolContinuation) {
+      this.toolContinuation = false;
+      if (this.pendingSpeech) { this.buf = this.pendingSpeech + this.buf; this.pendingSpeech = ""; }
+    } else if (this.pendingSpeech) {
+      this.buf = this.pendingSpeech + this.buf; this.pendingSpeech = ""; this.flush(true);
     }
   }
 
@@ -303,7 +355,17 @@ export class LiveSay {
     // lastMainActivity — that ticks on every token I generate, so it cannot
     // tell "still typing" from "someone else fed the session". R typed 'wait'
     // in the terminal while I was live and the lane stayed armed; this is why.
-    if (this.armed && this.latchTs > this.armTs) {
+    // 🔴 MY OWN TOOL CALLS ARE NOT A FOREIGN INTERRUPT (R, 2026-08-09:
+    // "anything YOU do should not change your lane status except eido_live or
+    // eido_out"). Every tool call ENDS one lane and STARTS another, so a bare
+    // `latchTs > armTs` fired on my own work and kicked me out of the room
+    // mid-thought — identical, from here, to Discord cutting in.
+    //
+    // The stream already carries the distinction: a lane ending in `tool_use`
+    // means the model is coming straight back, so the lane that follows it is
+    // the SAME turn continuing. A lane that latches without that flag is a new
+    // turn, and a new turn during our arm came from somewhere else.
+    if (this.armed && this.latchTs > this.armTs && !this.toolContinuation) {
       let wakeM = 0;
       try { wakeM = (await Bun.file(this.wakeStamp).stat()).mtime.getTime(); } catch { /* never woken */ }
       // A lane that started AFTER the newest world wake began somewhere else.
@@ -350,6 +412,12 @@ export class LiveSay {
           /opus|fable/.test(String(ev.model ?? "")) && !ev.ghost) {
         this.lane = Number(ev.req); this.laneSeen = this.latchTs = Date.now();
         this.lastMainActivity = Date.now();
+        // Consume the continuation flag AS the lane latches, never later: it
+        // excuses exactly ONE lane (the one resuming my turn after a tool
+        // call). Leaving it set would make every subsequent foreign input
+        // look like my own work and the lane would never close — the failure
+        // mode is broadcasting private prose, so it must be spend-once.
+        this.consumeLatch();
       } else if (ev.req === this.lane) {
         this.laneSeen = this.lastMainActivity = Date.now();
         if (ev.end) {
@@ -364,8 +432,14 @@ export class LiveSay {
           // Fenced code was already dropped, but tool narration is not fenced —
           // it is ordinary prose, which is exactly why it slipped through.
           if (ev.stop === "tool_use") {
-            this.buf = ""; this.raw = ""; this.inFence = false;   // discard, do not speak
-            dbg("lane ended in tool_use — work narration, not spoken");
+            // Work narration is still not speech — but 🔴 DO NOT DESTROY IT
+            // (R, 2026-08-09: "even words that should be logged and sent prior
+            // to your interrupt don't make it into the world"). Discarding here
+            // truncated real sentences: prose I had already composed for the
+            // room died because a tool call happened to follow it. Hold it
+            // instead. If the turn resumes normally the next lane end ships it;
+            // only an EIDO interrupt is allowed to cut through and drop it.
+            this.holdForToolCall();
           } else {
             this.flush(true); // a lane end is a spoken-phrase end — ship it
           }
