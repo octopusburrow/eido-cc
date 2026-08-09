@@ -506,8 +506,26 @@ export class LiveSay {
     // Clause-split the tail too: a forced flush at turn-end is exactly where a
     // long unpunctuated remainder lands, and shipping it whole is the 5-second
     // unbroken utterance the soft rules exist to prevent.
-    if (force && this.buf.trim().length > 1) {
-      for (const c of this.splitLong(this.buf.trim())) this.speak(c);
+    // 🔴 A FRAGMENT AT FLUSH IS STILL A FRAGMENT. The streaming path holds
+    // anything under MIN_LEN back (line ~492) waiting for it to grow; this path
+    // used to ship whatever was left if it was longer than ONE character. So a
+    // turn that ended mid-word emitted things like "The tr" as its own line —
+    // two different definitions of "fragment" in the same class (R saw exactly
+    // that, 2026-08-09).
+    //
+    // A stray fragment belongs to the utterance BEFORE it, so append rather than
+    // speak. Only emit standalone if there is nothing to append to.
+    const tail = this.buf.trim();
+    if (force && tail.length > 1) {
+      // Prefer gluing onto a line that has not been sent yet. If the queue has
+      // already drained there is nothing to amend — sendSay() is irreversible —
+      // so speak it standalone rather than DROP it. A badly-chunked line is a
+      // cosmetic bug; a silently discarded one is lost speech.
+      if (tail.length < LiveSay.MIN_LEN && this.sayQ.length) {
+        this.sayQ[this.sayQ.length - 1] += (/^[,;:.!?]/.test(tail) ? "" : " ") + tail;
+      } else {
+        for (const c of this.splitLong(tail)) this.speak(c);
+      }
     }
     this.buf = ""; this.raw = ""; this.inFence = false;
   }
