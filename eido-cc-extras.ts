@@ -374,7 +374,12 @@ export class LiveSay {
   }
 }
 
-const LOCAL_TOOLS = [
+/** The two lane verbs. EXPORTED because eido-cc.ts's tools/list splices them
+ *  onto the door's tools — the 08-07 split moved this definition here and left
+ *  that reference behind, so every tools/list threw ReferenceError until a live
+ *  connection to a test door surfaced it. Nothing in the unit suites calls
+ *  tools/list, which is why 26/10/10 stayed green over a broken adapter. */
+export const LOCAL_TOOLS = [
   { name: "eido_out", description: "Leave the live lane for the current turn: your prose stops streaming to the world as speech (it auto-armed because this turn began from an addressed wake). Actions/tools are unaffected. Use when a wake turn needs private work narration.", inputSchema: { type: "object", properties: {} } },
   { name: "eido_live", description: "Manually enter the live lane for this turn: from now until the turn ends, your prose streams into the world as sentence-chunked speech. Fenced code blocks stay silent.", inputSchema: { type: "object", properties: {} } },
 ];

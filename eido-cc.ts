@@ -424,7 +424,7 @@ export class DoorClient {
 
 // The two conveniences live in their own file so this one reads as plain MCPL.
 // See eido-cc-extras.ts — delete it and the wire-up in main() for stock behaviour.
-import { TypingWatcher, LiveSay } from "./eido-cc-extras.ts";
+import { TypingWatcher, LiveSay, LOCAL_TOOLS } from "./eido-cc-extras.ts";
 
 // ── downstream: Claude Code MCP channel server on stdio ─────────────────────
 
