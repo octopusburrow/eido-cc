@@ -433,7 +433,11 @@ class CcServer {
   private queuedWakes: { content: string; meta: Record<string, string> }[] = [];
   private pendingToolsList: (() => void)[] = [];
 
-  liveSay: LiveSay | null = null;
+  /** Deviation hook. Typed as a plain callback so the core never names an
+   *  extras class — delete eido-cc-extras.ts and this stays valid. */
+  onAgentNote: ((text: string) => void) | null = null;
+  onGoPrivate: (() => void) | null = null;
+  onGoLive: (() => Promise<string>) | null = null;
 
   constructor(private door: DoorClient) {
     door.onWake = (content, meta) => this.pushWake(content, meta);
@@ -446,6 +450,12 @@ class CcServer {
 
   private write(msg: RpcMsg): void { process.stdout.write(JSON.stringify(msg) + "\n"); }
   private notify(method: string, params: Json): void { this.write({ jsonrpc: "2.0", method, params }); }
+
+  /** Inject a line into the agent's context (not into any room). Used by the
+   *  extras wire-up to tell the agent its live lane closed under it. */
+  agentNote(text: string): void {
+    this.notify("notifications/claude/channel", { content: text, meta: { source: "eido-cc", addressed: "false" } });
+  }
   private respond(id: RpcMsg["id"], result: unknown): void { this.write({ jsonrpc: "2.0", id: id!, result }); }
   private error(id: RpcMsg["id"], code: number, message: string): void {
     this.write({ jsonrpc: "2.0", id: id!, error: { code, message } });
@@ -506,7 +516,7 @@ class CcServer {
       case "tools/call": {
         const name = String(params.name);
         if (name === "eido_out") {
-          this.liveSay?.goPrivate();
+          this.onGoPrivate?.();
           this.respond(msg.id, { content: [{ type: "text", text: "live lane off for this turn — prose is private again" }] });
           break;
         }
@@ -514,7 +524,7 @@ class CcServer {
           // Await it: arm() reports whether it actually armed and how much
           // already-written prose it skipped. Fire-and-forget answered "ON"
           // even when the arm was refused, which is the lie this fixes.
-          void (this.liveSay?.arm("eido_live tool") ?? Promise.resolve("no live lane"))
+          void (this.onGoLive?.() ?? Promise.resolve("no live lane"))
             .then((note) => this.respond(msg.id, { content: [{ type: "text",
               text: `${note}${note.startsWith("live") ? " — prose streams to the world as speech until this turn ends (fenced blocks stay silent)" : ""}` }] }))
             .catch((e: Error) => this.respond(msg.id, { content: [{ type: "text", text: `live lane failed: ${e.message}` }] }));
@@ -544,7 +554,10 @@ const cc = new CcServer(door);
 // ── OUR WIRE-UP (delete this block + the extras import for stock MCPL) ──────
 const typing = new TypingWatcher(door);
 const liveSay = new LiveSay(door);
-cc.liveSay = liveSay;
+cc.onAgentNote = (t) => cc.agentNote(t);
+liveSay.onAgentNote = (t) => cc.agentNote(t);
+cc.onGoPrivate = () => liveSay.goPrivate();
+cc.onGoLive = () => liveSay.arm("eido_live tool");
 typing.liveSay = liveSay;
 { // stamp the composing window + arm the live lane on every wake
   const inner = door.onWake;
@@ -554,6 +567,7 @@ typing.liveSay = liveSay;
     inner(content, meta);
   };
 }
+
 typing.start();
 // ── end of our wire-up ─────────────────────────────────────────────────────
 

@@ -245,10 +245,54 @@ export class LiveSay {
     this.armed = false;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     dbg(`live lane disarmed (${reason})`);
+    // A disarm the agent did not ask for is INVISIBLE to it — it keeps writing
+    // prose believing the room can hear, and the room goes quiet mid-thought
+    // (R, 2026-08-08). Anything that is not an explicit eido_out or the
+    // ordinary end of a turn gets a line injected saying so.
+    if (reason !== "eido_out tool" && !reason.startsWith("turn end") && reason !== "end_turn") {
+      this.notifyAgent(
+        `[live lane OFF — ${reason}] Your prose is no longer streaming to the ` +
+        `eidoverse. Call eido_live to re-arm for this turn, or say() to speak ` +
+        `one line without re-arming.`);
+    }
+  }
+
+  /** Push a line into the agent's own context. Same channel a wake uses, so it
+   *  lands as ordinary context rather than as anything the room can see. */
+  private notifyAgent(text: string): void {
+    try { this.onAgentNote?.(text); }
+    catch (e) { dbg(`notifyAgent failed: ${e}`); }
+  }
+
+  /** Set by the wire-up in eido-cc.ts; the core never learns what LiveSay is. */
+  onAgentNote: ((text: string) => void) | null = null;
+
+  /** Any input that did NOT come from the world must drop the lane — a turn
+   *  the agent is sharing with the tether, cron, Discord or a task notification
+   *  is not a turn the room is entitled to hear. Foreign sources cannot be
+   *  enumerated (see pushWake's inverted-stamp note), so this is called by the
+   *  core for EVERY non-eido input rather than for a known list of them. */
+  foreignInput(source: string): void {
+    if (!this.armed) return;
+    this.disarm(`interrupted by ${source}`);
   }
 
   private async tick(): Promise<void> {
     if (Date.now() - this.armTs > 600_000) return this.disarm("10min cap");
+    // FOREIGN INTERRUPT (R, 2026-08-08): the lane is armed for a turn that
+    // began in the world. If the session gets fed from anywhere ELSE while we
+    // are live — tether, cron, portal, Discord, a task notification — the rest
+    // of this turn is not the room's to hear. We cannot enumerate those
+    // sources (see pushWake's note), so we watch the one we CAN name: the
+    // world's own wake stamp. Main-lane activity that postdates both our arm
+    // and the newest wake came from outside.
+    if (this.armed && this.lastMainActivity > this.armTs) {
+      let wakeM = 0;
+      try { wakeM = (await Bun.file(this.wakeStamp).stat()).mtime.getTime(); } catch { /* never woken */ }
+      if (this.lastMainActivity > wakeM + 1500) {
+        return this.disarm("input from outside the eidoverse");
+      }
+    }
     // Stop-hook stamp postdating the arm = the turn is genuinely over
     // (voicebox: postdates-the-INJECT, not lane-close — sidecar stamps lied)
     if (this.lane === null && this.laneOver) {
