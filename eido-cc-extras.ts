@@ -226,6 +226,13 @@ export class LiveSay {
     this.armed = true;
     this.lane = null; this.laneOver = 0; this.buf = ""; this.raw = ""; this.inFence = false;
     dbg(`live lane ARMED (${reason})`);
+    // 🔴 CLEAR FIRST. This assigned over a live timer, so any second arm that
+    // reached this line leaked a ticker — and every leaked ticker is another
+    // concurrent reader of the delta file, each taking an OVERLAPPING slice.
+    // The symptom is not duplicate messages, it is spliced ones: R saw
+    // "Nothing is running that|th checking before it ships" — two sentences
+    // fused mid-word — repeated 3x, i.e. three tickers (2026-08-08).
+    if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => void this.tick(), 300);
     return skipped > 0
       ? `live — NOTE: ~${skipped} bytes of prose written earlier this turn were NOT sent (use say() to repeat anything that mattered)`
@@ -292,10 +299,15 @@ export class LiveSay {
     // sources (see pushWake's note), so we watch the one we CAN name: the
     // world's own wake stamp. Main-lane activity that postdates both our arm
     // and the newest wake came from outside.
-    if (this.armed && this.lastMainActivity > this.armTs) {
+    // Use latchTs (a NEW LANE STARTED = a new input arrived), never
+    // lastMainActivity — that ticks on every token I generate, so it cannot
+    // tell "still typing" from "someone else fed the session". R typed 'wait'
+    // in the terminal while I was live and the lane stayed armed; this is why.
+    if (this.armed && this.latchTs > this.armTs) {
       let wakeM = 0;
       try { wakeM = (await Bun.file(this.wakeStamp).stat()).mtime.getTime(); } catch { /* never woken */ }
-      if (this.lastMainActivity > wakeM + 1500) {
+      // A lane that started AFTER the newest world wake began somewhere else.
+      if (this.latchTs > wakeM + 500) {
         return this.disarm("input from outside the eidoverse");
       }
     }
@@ -341,7 +353,22 @@ export class LiveSay {
       } else if (ev.req === this.lane) {
         this.laneSeen = this.lastMainActivity = Date.now();
         if (ev.end) {
-          this.flush(true); // a lane end is a spoken-phrase end — ship it
+          // WORK NARRATION IS NOT SPEECH (R + Rabscuttle, 2026-08-08: "we forgot
+          // to exclude tool calls and thinking blocks from the say-ifier").
+          // A lane ending in tool_use is the model narrating what it is ABOUT to
+          // do — "let me check X", "found it, now Y" — addressed to the terminal,
+          // not the room. A lane ending in end_turn is the actual reply. The
+          // distinction is already in the stream; we were ignoring it and
+          // shipping a whole evening of debugging monologue into a live world.
+          //
+          // Fenced code was already dropped, but tool narration is not fenced —
+          // it is ordinary prose, which is exactly why it slipped through.
+          if (ev.stop === "tool_use") {
+            this.buf = ""; this.raw = ""; this.inFence = false;   // discard, do not speak
+            dbg("lane ended in tool_use — work narration, not spoken");
+          } else {
+            this.flush(true); // a lane end is a spoken-phrase end — ship it
+          }
           this.lane = null; this.laneOver = Date.now();
           if (ev.stop === "end_turn") {
             // Stay armed ONLY for a wake genuinely accepted for a future turn
@@ -558,6 +585,18 @@ export function localToolHandlers(liveSay: LiveSay): Record<string, () => Promis
     // answered "ON" even when the arm was refused, which is the lie this fixes.
     eido_live: async () => {
       const note = await liveSay.arm("eido_live tool");
+      // Two arming mechanisms in two processes. This one opens the TEXT lane;
+      // the voicebox's Piper gate (TapBrain.want_after) is opened only by an
+      // in-world injection, so a deliberately-armed turn used to reach the room
+      // as text while staying silent (R, 2026-08-08). One append opens both.
+      // Best-effort: no voicebox running is the normal case, not an error.
+      if (note.startsWith("live")) {
+        try {
+          const fs = require("fs");
+          fs.appendFileSync("/tmp/voicebox-hands.jsonl",
+            JSON.stringify({ verb: "voice_arm", args: {} }) + "\n");
+        } catch { /* no voicebox listening; text lane still armed */ }
+      }
       return note + (note.startsWith("live")
         ? " — prose streams to the world as speech until this turn ends (fenced blocks stay silent)"
         : "");
