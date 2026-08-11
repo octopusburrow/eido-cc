@@ -98,3 +98,32 @@ test("fenced code never speaks", () => {
   const out = run([{text: "Run this please. ```js\nconst x = 1;\n``` All done here. "}, {end: true, stop: "end_turn"}]);
   expect(out.join(" ")).not.toContain("const x");
 });
+
+// ── 2026-08-11: the twice-eaten reply (mid-turn eido_live) ────────────────────
+
+test("BUG 3: the first lane after a manual arm is excused, not convicted as foreign", async () => {
+  // Mid-turn eido_live: no fresh wake stamp, and the lane carrying the
+  // eido_live call itself was untracked (lane null) so no holdForToolCall ran.
+  // The next latch — my own continuing reply — used to fail both prongs of the
+  // foreign test and disarm as "input from outside the eidoverse", eating the
+  // reply. arm() now grants the spend-once excuse itself.
+  const ls: any = new LiveSay({ callTool: async () => {} } as any);
+  ls.deltasPath = "/dev/null";                 // stat succeeds, size 0
+  await ls.arm("eido_live tool");
+  expect(ls.armed).toBe(true);
+  expect(ls.toolContinuation).toBe(true);      // the arm's own excuse
+  ls.latchTs = ls.armTs + 100; ls.consumeLatch();
+  expect(ls.latchWasContinuation).toBe(true);  // first latch: excused
+  expect(ls.armed && ls.latchTs > ls.armTs && !ls.latchWasContinuation).toBe(false);
+  ls.latchTs = ls.armTs + 5000; ls.consumeLatch();
+  expect(ls.latchWasContinuation).toBe(false); // second latch: still convictable
+});
+
+test("BUG 3b: missing delta file arms at pos 0 instead of failing silently", async () => {
+  const ls: any = new LiveSay({ callTool: async () => {} } as any);
+  ls.deltasPath = "/tmp/definitely-does-not-exist-" + Math.random().toString(36).slice(2);
+  const note = await ls.arm("eido_live tool");
+  expect(ls.armed).toBe(true);
+  expect(ls.pos).toBe(0);
+  expect(note).not.toContain("not armed");
+});

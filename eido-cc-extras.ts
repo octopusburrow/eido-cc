@@ -248,6 +248,14 @@ export class LiveSay {
     this.armTs = Date.now();
     this.armed = true;
     this.lane = null; this.laneOver = 0; this.buf = ""; this.raw = ""; this.inFence = false;
+    // THE ARM EXCUSES ITS OWN FIRST LANE (2026-08-11, the twice-eaten reply).
+    // A mid-turn eido_live arms with no fresh wake stamp, and the lane that
+    // ended carrying the eido_live call itself was never tracked (lane was
+    // null), so toolContinuation stayed false — the very next latch, i.e. MY
+    // OWN CONTINUING REPLY, then failed both prongs of the foreign-input test
+    // and disarmed as "input from outside the eidoverse". Spend-once
+    // semantics are preserved: consumeLatch clears it at the first latch.
+    this.toolContinuation = true;
     dbg(`live lane ARMED (${reason})`);
     // 🔴 CLEAR FIRST. This assigned over a live timer, so any second arm that
     // reached this line leaked a ticker — and every leaked ticker is another
