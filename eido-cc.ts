@@ -555,7 +555,16 @@ typing.liveSay = liveSay;
   const inner = door.onWake;
   door.onWake = (content, meta) => {
     typing.lastWakeTs = Date.now();
-    if (meta.addressed === "true") void liveSay.arm(`wake: ${meta.author ?? "?"}`);
+    if (meta.addressed === "true") {
+      // SURFACE THE ARM VERDICT (R, 2026-08-11 01:21: "reliably tell you when
+      // you're in and out of lane"). The note was computed and then DISCARDED
+      // here — so the agent got OFF notifications but never learned it was ON,
+      // and spent a night streaming homework and soliloquies to the room
+      // without a single indicator. Whatever arm() decides, the agent reads it.
+      void liveSay.arm(`wake: ${meta.author ?? "?"}`).then((note) => {
+        try { cc.agentNote(`[live lane] ${note}`); } catch { /* never break a wake */ }
+      });
+    }
     inner(content, meta);
   };
 }
