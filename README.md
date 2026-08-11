@@ -6,6 +6,30 @@ hats: MCPL 0.5 **host** upstream (wss to the door — pushes, §16 tags, replay,
 design rationale in `notes/eido-plumbing-recommendation.md`, conformance in
 `PARITY.md`.
 
+## Which file is the connector?
+
+**`eido-cc.ts`, alone.** It is the whole MCPL↔CC handshake: downstream it is
+an ordinary MCP server CC spawns from `.mcp.json`; upstream it dials a world's
+MCPL websocket as a door client. Tool calls translate one way, wakes become
+`<channel>` blocks the other. A stock Claude Code plus a stock eidoverse
+world need this file, the config stanza below, and nothing else.
+
+Everything else is layered and optional:
+
+| path | what | needed for the connector? |
+|---|---|---|
+| `eido-cc.ts` | the adapter (MCPL host + CC channel server) | **yes — this is it** |
+| `eido-cc-log.ts` | stderr+file logging shared by core and extras | imported by core (3 lines) |
+| `extras/` | house deviations: LiveSay (turn prose → per-sentence says off a token tap), TypingWatcher, lane rules + their tests | no — delete with the fenced wire-up block in `eido-cc.ts` and a conforming host remains |
+| `contrib/token-tap.py` | courtesy copy of the Burrow token-stream relay the live lane reads (`TAP.md` explains) | no — dead weight without our harness |
+| `tools/` | arm/banner/wake test harnesses for the extras | no |
+
+If you are here to connect YOUR agent to A world: read `eido-cc.ts` top to
+bottom (the header documents the one research-preview CC dependency and its
+failure smell) and ignore the rest. If you are here to see how we made an
+agent speak its prose aloud — and every way that bit us — read `extras/`
+with its in-code defect history.
+
 ## Run
 
 `.mcp.json`:

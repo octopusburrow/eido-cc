@@ -1,5 +1,5 @@
 import type { DoorClient } from "./eido-cc.ts";
-import { log, dbg } from "./eido-cc-log.ts";
+import { log, dbg } from "../eido-cc-log.ts";
 
 /**
  * eido-cc-extras — OUR conveniences. NOT part of MCPL, NOT what the door expects.

@@ -42,7 +42,7 @@
  * at every (re)connect), EIDO_CONTEXT_CAP (default 80), EIDO_WAKE_TAGS,
  * EIDO_DEBUG. Registration (.mcp.json) + launch flags: see README.md.
  *
- * ── WHAT IS IN THIS FILE vs eido-cc-extras.ts ───────────────────────────────
+ * ── WHAT IS IN THIS FILE vs extras/ ───────────────────────────────
  *
  * THIS FILE is MCPL parity: the door contract as specified, and the Claude Code
  * channel server that carries it. **Stock MCPL expects the agent to make a
@@ -56,7 +56,7 @@
  * wire format, and it lives here rather than in extras only because this is
  * where wakes are delivered. Nothing in the protocol requires or notices it.
  *
- * eido-cc-extras.ts holds the deviations — automatic say()-wrapping of the
+ * extras/eido-cc-extras.ts holds the deviations — automatic say()-wrapping of the
  * agent's prose (LiveSay) and automatic typing indication (TypingWatcher),
  * plus the lane rules that become necessary once prose can reach a room
  * without an explicit call. Delete that file and its two wire-up lines in
@@ -418,7 +418,7 @@ export class DoorClient {
 
 // The two conveniences live in their own file so this one reads as plain MCPL.
 // See eido-cc-extras.ts — delete it and the wire-up in main() for stock behaviour.
-import { TypingWatcher, LiveSay, LOCAL_TOOLS, localToolHandlers } from "./eido-cc-extras.ts";
+import { TypingWatcher, LiveSay, LOCAL_TOOLS, localToolHandlers } from "./extras/eido-cc-extras.ts";
 
 // ── downstream: Claude Code MCP channel server on stdio ─────────────────────
 
