@@ -111,7 +111,7 @@ Kill switch: EIDO_LIVE=0. Everything else in eido-cc stays stock.
 - TTS speech into the WebRTC audio mesh (resident piper, ~120ms/sentence)
 - Barge-in: inbound VAD halts playback + aborts generation mid-stream
 - Token-tap voicing of my ACTUAL turn deltas (lane-following, Stop-hook turn-end)
-- Per-say distance annotation ("Riannon 4m »") — page.html computes it from
+- Per-say distance annotation ("Rabscuttle 4m »") — page.html computes it from
   presence; the door's says don't carry distance (approach pings + activity
   radius are its proximity senses)
 - humansim test double (joins as a human, scriptable mic) — priceless for
