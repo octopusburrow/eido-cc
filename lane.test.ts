@@ -28,11 +28,27 @@ test("prose ending in a tool call is not spoken", () => {
 // ── R, 2026-08-09: the two lane bugs ──────────────────────────────────────────
 
 test("BUG 1: my own tool call does not disarm the lane", () => {
+  // 🔴 Run the WHOLE sequence tick will see. The old version asserted
+  // toolContinuation before the latch spent it — an ingredient, not the
+  // verdict — and stayed green for two days while tick() read the spent
+  // flag and disarmed on every own-tool lane (the "Need her" fragments).
   const ls: any = new LiveSay({ callTool: async () => {} } as any);
   ls.armed = true; ls.armTs = 1000;
   ls.holdForToolCall();                       // a lane ended in tool_use
-  ls.latchTs = 2000;                          // the next lane latches (my turn resuming)
-  expect(ls.toolContinuation).toBe(true);     // ...and it is excused
+  ls.latchTs = 2000; ls.consumeLatch();       // next lane latches; flag SPENT here
+  // ...and only NOW does a tick run. It must read the recorded verdict:
+  expect(ls.latchWasContinuation).toBe(true);
+  expect(ls.armed && ls.latchTs > ls.armTs && !ls.latchWasContinuation).toBe(false);
+});
+
+test("BUG 1c: a foreign latch (no tool_use before it) is still convicted at tick", () => {
+  const ls: any = new LiveSay({ callTool: async () => {} } as any);
+  ls.armed = true; ls.armTs = 1000;
+  ls.holdForToolCall();
+  ls.latchTs = 2000; ls.consumeLatch();       // my continuation — excused
+  ls.latchTs = 3000; ls.consumeLatch();       // a SECOND latch with no hold = foreign
+  expect(ls.latchWasContinuation).toBe(false);
+  expect(ls.armed && ls.latchTs > ls.armTs && !ls.latchWasContinuation).toBe(true);
 });
 
 test("BUG 1b: the excuse is spend-once, so a real foreign input still disarms", () => {

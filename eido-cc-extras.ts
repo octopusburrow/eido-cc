@@ -148,6 +148,14 @@ export class LiveSay {
    *  continue. The NEXT lane to latch is therefore mine, not a foreign input.
    *  Without this the two are indistinguishable — see continuesMyTurn below. */
   private toolContinuation = false;
+  /** The VERDICT on the newest latch, recorded at latch time: was it my own
+   *  turn continuing after a tool call? tick() must read this, never the raw
+   *  toolContinuation flag — consumeLatch spends that flag synchronously AT
+   *  the latch (spend-once, and rightly), so by any tick it is always false
+   *  and the my-tools-are-not-foreign guard never actually guarded. Two
+   *  correct fixes, mutually annihilating; the poll must read a recorded
+   *  judgment, not the perishable ingredient (2026-08-10). */
+  private latchWasContinuation = false;
   /** Prose composed before a tool call, held rather than discarded. */
   private pendingSpeech = "";
   private laneSeen = 0;
@@ -314,6 +322,8 @@ export class LiveSay {
    *  lane) and either resume the held sentence or, if this is genuinely a new
    *  turn, ship what the previous one left behind rather than lose it. */
   consumeLatch(): void {
+    this.latchWasContinuation = this.toolContinuation;
+    dbg(`latch: continuation=${this.toolContinuation} held=${this.pendingSpeech.length}`);
     if (this.toolContinuation) {
       this.toolContinuation = false;
       if (this.pendingSpeech) { this.buf = this.pendingSpeech + this.buf; this.pendingSpeech = ""; }
@@ -365,7 +375,7 @@ export class LiveSay {
     // means the model is coming straight back, so the lane that follows it is
     // the SAME turn continuing. A lane that latches without that flag is a new
     // turn, and a new turn during our arm came from somewhere else.
-    if (this.armed && this.latchTs > this.armTs && !this.toolContinuation) {
+    if (this.armed && this.latchTs > this.armTs && !this.latchWasContinuation) {
       let wakeM = 0;
       try { wakeM = (await Bun.file(this.wakeStamp).stat()).mtime.getTime(); } catch { /* never woken */ }
       // A lane that started AFTER the newest world wake began somewhere else.
