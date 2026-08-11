@@ -207,7 +207,16 @@ export class LiveSay {
       const size = (await Bun.file(this.deltasPath).stat()).size;
       skipped = Math.max(0, size - this.pos);   // prose written before this arm
       this.pos = size;
-    } catch { return "could not read the delta stream — lane not armed"; }
+    } catch {
+      // BOOTSTRAP RACE (2026-08-11): a fresh session's delta file is created
+      // by its FIRST API request — which always postdates the wake that starts
+      // the turn. A missing file is an empty stream, not an error: arm at
+      // pos 0 and tick() picks the file up when it appears. (The old
+      // return here failed SILENTLY — no dbg — and cost an hour of live
+      // debugging with R standing in the room.)
+      this.pos = 0;
+      dbg("delta stream not present yet (fresh session) — armed at pos 0");
+    }
     // Defect G (06:22Z): a wake delivered MID-TURN must not arm — the
     // running turn belongs to whoever started it (usually the tether), and
     // arming here streams private prose into the room. Idle test: the last
