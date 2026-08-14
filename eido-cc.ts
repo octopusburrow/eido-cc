@@ -266,6 +266,7 @@ export class DoorClient {
     const receipt = await this.request("featureSets/update", {
       effectiveCapabilities: [
         "tools", "channels.register", "channels.lifecycle",
+        "channels.join",   // RFC-005: travel's lane 1 is a join-intent open
         "channels.publish", "channels.incoming", "channels.streaming",
       ],
       deniedCapabilities: [],
