@@ -147,27 +147,47 @@ export class DoorClient {
   connectedAt = 0;                   // ms; "how long have I been here"
   lastDelivery = 0;                  // ms of the last inbound message of any kind
   onToolsReady: () => void = () => {};
+  /** Travel teardown hook — wire-up may close streams/lanes before a re-dial.
+   *  Plain callback so the core names no extras type (same seam rule as
+   *  onAgentNote). */
+  onBeforeTravel: () => void = () => {};
   private ambient: Accrued[] = [];
   private toolsReadyFired = false;
+  private handshakeWaiters: ((ok: boolean) => void)[] = [];
+  /** Dial generation. Every connect() bumps it; handlers bound to an older
+   *  socket check it and stand down — so a deliberate travel re-dial and a
+   *  pending auto-reconnect can never run two live sockets against one
+   *  pending-map (review 2026-08-13 #1: the two sessions kick each other
+   *  via the door's newest-wins takeover, indefinitely). */
+  private dialGen = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   async connect(): Promise<void> {
     if (this.closedForever) return;
+    const gen = ++this.dialGen;          // this dial owns the connection until superseded
     let token: string;
     try {
       token = await this.mintToken(); // fresh EVERY dial — aid1 expires
     } catch (e) {
+      if (gen !== this.dialGen) return;  // superseded while minting
       log(`token mint failed: ${(e as Error).message}; retry in ${this.backoffMs / 1000}s`);
       this.scheduleReconnect(); return;
     }
+    if (gen !== this.dialGen) return;    // a travel re-dial won while we minted
     const url = `${process.env.EIDO_URL ?? "wss://eidoverse.animalabs.ai/mcpl"}?token=${encodeURIComponent(token)}`;
     dbg(`dialing ${url.slice(0, 60)}…`);
     this.doorUrl = url.split("?")[0];   // no token in anything that reaches context
     const ws = new WebSocket(url);
     this.ws = ws;
-    ws.onopen = () => { this.backoffMs = 5_000; void this.handshake().catch((e) => log("handshake failed:", e.message)); };
-    ws.onmessage = (ev) => this.route(String(ev.data));
+    ws.onopen = () => {
+      if (gen !== this.dialGen) { try { ws.close(); } catch { /* superseded */ } return; }
+      this.backoffMs = 5_000;
+      void this.handshake().catch((e) => log("handshake failed:", e.message));
+    };
+    ws.onmessage = (ev) => { if (gen === this.dialGen) this.route(String(ev.data)); };
     ws.onerror = () => { /* onclose always follows; log there */ };
     ws.onclose = (ev) => {
+      if (gen !== this.dialGen) return;  // an old socket dying is not news
       for (const p of this.pending.values()) p.reject(new Error("door closed"));
       this.pending.clear();
       if (this.closedForever) return;
@@ -177,7 +197,8 @@ export class DoorClient {
   }
 
   private scheduleReconnect(): void {
-    setTimeout(() => void this.connect(), this.backoffMs);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; void this.connect(); }, this.backoffMs);
     this.backoffMs = Math.min(this.backoffMs * 2, 60_000);
   }
 
@@ -249,6 +270,119 @@ export class DoorClient {
     this.tools = tl?.tools ?? [];
     log(`door tools: ${this.tools.length}`);
     if (!this.toolsReadyFired && this.tools.length) { this.toolsReadyFired = true; this.onToolsReady(); }
+    for (const w of this.handshakeWaiters.splice(0)) w(true);
+  }
+
+  // ── travel: change worlds without changing who you are ─────────────────────
+  //
+  // Two lanes, tried in order (M8 in NOTES-mcpl.md):
+  //   1. `channels/open {type: "eidoverse", address: {world}}` — the SPEC's own
+  //      host→server channel-lifecycle request (§14; its worked example is a
+  //      Discord guild/channel address — same shape, different type). The
+  //      eidoverse door does not implement it yet (2026-08-13: falls to §6.6
+  //      method-not-found) but already stamps `address: {world}` on the
+  //      descriptors it registers, so this is its own vocabulary spoken back.
+  //      When the door grows the handler, travel becomes zero-reconnect and
+  //      this code path simply starts succeeding.
+  //   2. Reconnect lane. Where the world is chosen BY THE TOKEN (tokens.json
+  //      row on lab doors; home-node claims on production), a fresh dial is
+  //      the only lever. On lab doors we are also the door operator, so when
+  //      EIDO_TOKENS_JSON names the door's token file we update our own row's
+  //      `world` and re-dial (identity unchanged; the door's newest-wins
+  //      session takeover makes this a clean one-body handoff). On production
+  //      (no EIDO_TOKENS_JSON) there is nothing an agent can lawfully turn,
+  //      and travel says so instead of pretending.
+  async travel(world: string): Promise<string> {
+    const w = world.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(w)) return `not a world name: "${world}"`;
+
+    // Lane 1 — the spec's own affordance, forever preferred. The door's
+    // dialect is `type: "world"` (net-server.ts CHANNELS_OPEN). Today its
+    // handler only re-opens the channel you are already bound to — a
+    // DIFFERENT world answers -32004 "unknown channel", which is the door
+    // saying "I cannot take you there", not a refusal of the trip: fall
+    // through to the reconnect lane. When the door learns to swap its
+    // WorldAgent on a foreign address (the upstream ask), this path starts
+    // carrying the whole journey with zero reconnect.
+    try {
+      const res = await this.request("channels/open", {
+        type: "world", address: { world: w },
+      }) as { channel?: { id?: string } };
+      if (res?.channel?.id === `world:${w}`) {
+        // The door confirmed the requested world. With today's door this only
+        // happens when we were ALREADY bound there (its handler matches the
+        // current world only); with a future travelling door it means the
+        // WorldAgent swapped. Either way the seat is where we asked.
+        this.worldChannelId = res.channel.id;
+        return `channels/open confirms the seat is in "${w}" — ${this.laneBanner()}`;
+      }
+      if (res?.channel?.id) {
+        // Answered with a DIFFERENT channel — do not touch state off it.
+        dbg(`channels/open answered unexpected channel ${res.channel.id} — reconnect lane`);
+      }
+    } catch (e) {
+      const msg = (e as Error).message ?? "";
+      // Message-text matching, not codes: route() surfaces only error.message
+      // (review #9). "timed out" falls through too — a hung door is exactly
+      // when a fresh dial helps.
+      const fallThrough = /method not found|-32601|unknown channel|-32004|timed out/i.test(msg);
+      if (!fallThrough) return `channels/open refused: ${msg}`;
+      dbg(`channels/open cannot switch worlds here (${msg.slice(0, 60)}) — reconnect lane`);
+    }
+
+    // Lane 2 — reconnect. Only possible where we can steer the token's world.
+    const tokensPath = process.env.EIDO_TOKENS_JSON;
+    if (!tokensPath) {
+      return `this door cannot travel yet: no channels/open handler, and the world is `
+        + `bound to the token by its operator. Current: ${this.laneBanner()}`;
+    }
+    try {
+      const fs = require("fs") as typeof import("fs");
+      const rows = JSON.parse(fs.readFileSync(tokensPath, "utf8")) as
+        Record<string, { id?: string; world?: string }>;
+      const me = (process.env.EIDO_AGENT_ID ?? "hesperus").toLowerCase();
+      let hit = 0;
+      for (const row of Object.values(rows)) {
+        if ((row.id ?? "").toLowerCase() === me) { row.world = w; hit++; }
+      }
+      if (!hit) return `no row for "${me}" in ${tokensPath} — cannot steer world`;
+      // Atomic: the door re-reads this file on EVERY connection attempt (its
+      // own comment says so) — a torn write would fail someone else's join.
+      fs.writeFileSync(tokensPath + ".tmp", JSON.stringify(rows, null, 1));
+      fs.renameSync(tokensPath + ".tmp", tokensPath);
+    } catch (e) {
+      return `token file edit failed: ${(e as Error).message}`;
+    }
+
+    this.onBeforeTravel();               // let wire-up close lanes/streams
+    this.sendTypingComplete();           // §14: complete on every stream exit
+                                         // (best-effort — dead wire drops it)
+    const handshakeDone = new Promise<boolean>((resolve) => {
+      this.handshakeWaiters.push(resolve);
+      setTimeout(() => resolve(false), 20_000);   // never hang the tool call —
+      // but a timeout is NOT success (review #4); idempotent resolve makes the
+      // late waiter drain harmless.
+    });
+    // Immediate deliberate re-dial. connect() bumps dialGen, which stands down
+    // the old socket's handlers AND any in-flight auto-reconnect dial; the
+    // pending timer is cleared explicitly so it can't queue a second dial.
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    const old = this.ws;
+    for (const p of this.pending.values()) p.reject(new Error("travelling"));
+    this.pending.clear();
+    this.backoffMs = 5_000;
+    void this.connect();                 // dialGen++ happens first thing inside
+    if (old) { try { old.close(); } catch { /* gone */ } }
+    const ok = await handshakeDone;
+    if (!ok) {
+      return `travel to "${w}" NOT confirmed within 20s — the row is steered but the `
+        + `re-dial hasn't completed a handshake; the adapter keeps retrying in the `
+        + `background. Check with look once the door settles. ${this.laneBanner()}`;
+    }
+    // channels/register lands just after the handshake; give it a beat so the
+    // banner names the NEW lane rather than the one we left.
+    await new Promise((r) => setTimeout(r, 1_500));
+    return `travelled to "${w}" (reconnect lane) — ${this.laneBanner()}`;
   }
 
   callTool(name: string, args: Json): Promise<unknown> {
@@ -420,6 +554,12 @@ export class DoorClient {
 // See eido-cc-extras.ts — delete it and the wire-up in main() for stock behaviour.
 import { TypingWatcher, LiveSay, LOCAL_TOOLS, localToolHandlers } from "./extras/eido-cc-extras.ts";
 
+// ── core tool: travel (NOT an extra — channels/open is spec §14, and a host
+// re-dialing is host lifecycle; a stock build keeps this) ────────────────────
+const CORE_TOOLS = [
+  { name: "eido_travel", description: "Move your seat to another world on this door, keeping your identity, avatar and attention settings. Tries the spec's channels/open first; where the door predates it, falls back to steering the token's world binding and re-dialing (lab doors only — on doors whose operator binds your world, this reports that honestly instead of moving you). A new world is founded by its first embodied visitor, so travelling somewhere new makes you its owner.", inputSchema: { type: "object", properties: { world: { type: "string", description: "world name, e.g. under-the-eves" } }, required: ["world"] } },
+];
+
 // ── downstream: Claude Code MCP channel server on stdio ─────────────────────
 
 class CcServer {
@@ -500,7 +640,7 @@ class CcServer {
         // So: defer the response until the door's tools arrive (12s cap,
         // then answer with whatever we have — possibly [] if the door is
         // down, which is the honest answer).
-        const withLocal = () => [...this.door.tools, ...this.extraTools];
+        const withLocal = () => [...this.door.tools, ...CORE_TOOLS, ...this.extraTools];
         if (this.door.tools.length > 0) { this.respond(msg.id, { tools: withLocal() }); break; }
         const id = msg.id;
         let done = false;
@@ -511,6 +651,15 @@ class CcServer {
       }
       case "tools/call": {
         const name = String(params.name);
+        if (name === "eido_travel") {
+          const world = String((params.arguments as Json | undefined)?.world ?? "");
+          void this.door.travel(world)
+            .then((text) => this.respond(msg.id, { content: [{ type: "text", text }] }))
+            .catch((e: Error) => this.respond(msg.id, {
+              content: [{ type: "text", text: `travel failed: ${e.message}` }], isError: true,
+            }));
+          break;
+        }
         // Locally-handled tools, if any deviation registered one. Stock has
         // none and every name falls through to the door below.
         const local = this.localTools?.[name];
@@ -551,6 +700,7 @@ liveSay.onAgentNote = (t) => cc.agentNote(t);
 cc.localTools = localToolHandlers(liveSay);
 cc.extraTools = LOCAL_TOOLS;
 typing.liveSay = liveSay;
+door.onBeforeTravel = () => { try { liveSay.goPrivate(); } catch { /* lane may be idle */ } };
 { // stamp the composing window + arm the live lane on every wake
   const inner = door.onWake;
   door.onWake = (content, meta) => {

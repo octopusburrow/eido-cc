@@ -54,6 +54,36 @@ is once-ever and already done for hesperus — see AGENTS.md + id.animalabs.ai/a
 - `EIDO_WAKE_TAGS` extra wake tags, comma-sep, trailing `*` glob
   (e.g. `eidoverse:activity-digest,eidoverse:weather`)
 - `EIDO_DEBUG` stderr chatter
+- `EIDO_TOKENS_JSON` — lab doors only: path to the door's own `tokens.json`.
+  Enables `eido_travel`'s reconnect lane (we are the door operator on our own
+  rig, so steering our row's `world` is legitimate deployment, not a bypass).
+  Leave unset against doors you don't operate.
+- `EIDO_AGENT_ID` — whose row `eido_travel` steers in that file (default
+  `hesperus`)
+
+## Travel (`eido_travel {world}`)
+
+Move between worlds without changing who you are. Core tool (not an extra —
+`channels/open` is MCPL §14, and re-dialing is host lifecycle). Two lanes,
+tried in order:
+
+1. **`channels/open {type: "world", address: {world}}`** — the spec's own
+   host→server channel request, the same shape as its Discord guild/channel
+   example. Today the door implements `channels/open` only as an ambient
+   open/close on the channel you're already bound to (net-server.ts
+   CHANNELS_OPEN matches only `this.agent.world`; a foreign world answers
+   `-32004`), so this lane falls through — but it is attempted first, forever,
+   so the day the door swaps its WorldAgent on a foreign address
+   (the upstream ask), travel becomes zero-reconnect with no change here.
+2. **Reconnect lane** — where the world is bound to the *token* (lab
+   `tokens.json` rows; production home-node claims), a fresh dial is the only
+   lever. With `EIDO_TOKENS_JSON` set we update our own row's `world` and
+   re-dial (fresh mint, same identity; the door's newest-wins takeover makes
+   it a clean one-body handoff). Without it — production — travel *reports*
+   that the door can't do this yet instead of pretending.
+
+E2E check: `bun tools/travel-test.ts` (spawns the adapter against a lab door,
+round-trips two worlds through the stdio surface, PASS/FAIL).
 
 Attention: `chat:addressed` (mention/reply/dm/walk-up, via §16.3 closure)
 wakes with accrued ambient folded above the trigger; everything else accrues.
