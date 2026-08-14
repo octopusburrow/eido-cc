@@ -159,6 +159,13 @@ export class DoorClient {
    *  travel reports the honest refusal. */
   onTravelFallback: ((world: string) => Promise<string>) | null = null;
   private ambient: Accrued[] = [];
+  /** RFC-005 §3.2.3d: the door's attachment epoch — WHICH attachment we're on,
+   *  not merely which world. 0 on doors that predate the RFC. */
+  epoch = 0;
+  /** The epoch a prepare proposed. Promoted to `epoch` only when the
+   *  transition is observed to have COMMITTED (the channels/open result, or a
+   *  later descriptor). A prepare the host accepts can still die at commit. */
+  private pendingEpoch: number | null = null;
   private toolsReadyFired = false;
   private handshakeWaiters: ((ok: boolean) => void)[] = [];
   /** Dial generation. Every connect() bumps it; handlers bound to an older
@@ -317,6 +324,12 @@ export class DoorClient {
         type: "world", address: { world: w },
       }) as { channel?: { id?: string } };
       if (res?.channel?.id === `world:${w}`) {
+        // COMMITTED: the door answered with the new channel, so any epoch a
+        // prepare proposed is now real. Prefer the result's own value.
+        const committed = (res.channel as { metadata?: { epoch?: number } }).metadata?.epoch;
+        if (typeof committed === "number") this.epoch = committed;
+        else if (this.pendingEpoch !== null) this.epoch = this.pendingEpoch;
+        this.pendingEpoch = null;
         // The door confirmed the requested world. With today's door this only
         // happens when we were ALREADY bound there (its handler matches the
         // current world only); with a future travelling door it means the
@@ -428,9 +441,22 @@ export class DoorClient {
       case "channels/changed": {
         // §14.5 dual-mode: as a Request it needs itemized per-descriptor
         // results (same shape as register). We accept world channels.
-        const added = ((params.added ?? []) as { id: string }[]).map((c) => ({ id: c.id, accepted: true }));
+        // RFC-005 §3.2.3a: on a join-capable door this Request arrives at
+        // PREPARE — the server is asking permission BEFORE moving the body,
+        // and a refusal (or silence) aborts the transition with nothing moved.
+        // We accept world channels, so answering promptly is the whole job.
+        const addedRaw = (params.added ?? []) as { id: string; metadata?: { epoch?: number; created?: boolean } }[];
+        const added = addedRaw.map((c) => ({ id: c.id, accepted: true }));
         if (msg.id !== undefined) this.respond(msg.id, { results: added });
-        dbg(`channels/changed: +${added.length} -${((params.removed ?? []) as string[]).length}`);
+        for (const c of addedRaw) {
+          // §3.2.3d: this arrives at PREPARE, so the epoch here is the one the
+          // transition WOULD commit to — not one that has happened. Hold it as
+          // pending; a transition the host accepts can still die at commit, and
+          // believing the proposal drifts the client by one per aborted join.
+          if (typeof c.metadata?.epoch === "number") this.pendingEpoch = c.metadata.epoch;
+          if (c.metadata?.created) log(`founded a new world: ${c.id}`);   // §3.2.7 — never silently
+        }
+        dbg(`channels/changed: +${added.length} -${((params.removed ?? []) as string[]).length} epoch=${this.epoch}`);
         break;
       }
       case "mcpl/manifestChanged":
