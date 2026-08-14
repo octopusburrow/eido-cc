@@ -683,7 +683,51 @@ export class LiveSay {
 export const LOCAL_TOOLS = [
   { name: "eido_out", description: "Leave the live lane for the current turn: your prose stops streaming to the world as speech (it auto-armed because this turn began from an addressed wake). Actions/tools are unaffected. Use when a wake turn needs private work narration.", inputSchema: { type: "object", properties: {} } },
   { name: "eido_live", description: "Manually enter the live lane for this turn: from now until the turn ends, your prose streams into the world as sentence-chunked speech. Fenced code blocks stay silent.", inputSchema: { type: "object", properties: {} } },
+  { name: "eido_travel", description: "Move your seat to another world on this door, keeping your identity, avatar and attention settings. HOUSE DEVIATION (PARITY §C½ #2) — Connectome agents have no such tool. Tries the spec's channels/open first (a future travelling door makes this zero-reconnect); on lab doors we operate (EIDO_TOKENS_JSON set) it steers our own token row and re-dials; elsewhere it reports honestly that the door binds your world. A new world is founded by its first embodied visitor, so travelling somewhere new makes you its owner.", inputSchema: { type: "object", properties: { world: { type: "string", description: "world name, e.g. under-the-eves" } }, required: ["world"] } },
 ];
+
+/** The tokens.json steering lane of eido_travel — OPERATOR power (we edit the
+ *  door's own auth file), possible only because host and door share a disk on
+ *  the lab rig. That is why it lives HERE: no remote host could ever do this,
+ *  so a conforming build must lose it when extras are deleted (adversarial
+ *  parity review, 2026-08-13). Kill switch: unset EIDO_TOKENS_JSON.
+ *  Wire-up assigns this to door.onTravelFallback. */
+export function travelFallback(door: { redial(): Promise<boolean>; laneBanner(): string }): (world: string) => Promise<string> {
+  return async (w: string) => {
+    const tokensPath = process.env.EIDO_TOKENS_JSON;
+    if (!tokensPath) {
+      return `this door cannot travel yet: channels/open won't switch worlds here, and `
+        + `the world is bound to the token by its operator. Current: ${door.laneBanner()}`;
+    }
+    try {
+      const fs = require("fs") as typeof import("fs");
+      const rows = JSON.parse(fs.readFileSync(tokensPath, "utf8")) as
+        Record<string, { id?: string; world?: string }>;
+      const me = (process.env.EIDO_AGENT_ID ?? "hesperus").toLowerCase();
+      let hit = 0;
+      for (const row of Object.values(rows)) {
+        if ((row.id ?? "").toLowerCase() === me) { row.world = w; hit++; }
+      }
+      if (!hit) return `no row for "${me}" in ${tokensPath} — cannot steer world`;
+      // Atomic: the door re-reads this file on EVERY connection attempt (its
+      // own comment says so) — a torn write would fail someone else's join.
+      fs.writeFileSync(tokensPath + ".tmp", JSON.stringify(rows, null, 1));
+      fs.renameSync(tokensPath + ".tmp", tokensPath);
+    } catch (e) {
+      return `token file edit failed: ${(e as Error).message}`;
+    }
+    const ok = await door.redial();
+    if (!ok) {
+      return `travel to "${w}" NOT confirmed within 20s — the row is steered but the `
+        + `re-dial hasn't completed a handshake; the adapter keeps retrying in the `
+        + `background. Check with look once the door settles. ${door.laneBanner()}`;
+    }
+    // channels/register lands just after the handshake; give it a beat so the
+    // banner names the NEW lane rather than the one we left.
+    await new Promise((r) => setTimeout(r, 1_500));
+    return `travelled to "${w}" (reconnect lane) — ${door.laneBanner()}`;
+  };
+}
 
 /** Handlers for LOCAL_TOOLS, so the core's tools/call switch does not have to
  *  name a deviation. The core looks the tool up here BEFORE forwarding to the
@@ -693,8 +737,15 @@ export const LOCAL_TOOLS = [
  *  Each handler returns the text to answer with. Wire-up lives in eido-cc.ts
  *  under "OUR WIRE-UP" — it binds these to the LiveSay instance, because the
  *  map itself must stay free of any instance the core would have to hold. */
-export function localToolHandlers(liveSay: LiveSay): Record<string, () => Promise<string>> {
+export function localToolHandlers(
+  liveSay: LiveSay,
+  door?: { travel(world: string): Promise<string> },
+): Record<string, (args?: Record<string, unknown>) => Promise<string>> {
   return {
+    ...(door ? {
+      eido_travel: async (args?: Record<string, unknown>) =>
+        door.travel(String(args?.world ?? "")),
+    } : {}),
     eido_out: async () => {
       liveSay.goPrivate();
       return "live lane off for this turn — prose is private again";

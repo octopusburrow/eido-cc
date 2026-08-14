@@ -151,6 +151,13 @@ export class DoorClient {
    *  Plain callback so the core names no extras type (same seam rule as
    *  onAgentNote). */
   onBeforeTravel: () => void = () => {};
+  /** Travel fallback seam. When the spec lane (channels/open) cannot move the
+   *  seat, core calls this if a deviation supplied one — the lab-door
+   *  tokens.json steering lives in extras behind it (adversarial parity
+   *  review 2026-08-13: editing the door's auth file is OPERATOR power no
+   *  remote host has; it must vanish when extras are deleted). Stock: null →
+   *  travel reports the honest refusal. */
+  onTravelFallback: ((world: string) => Promise<string>) | null = null;
   private ambient: Accrued[] = [];
   private toolsReadyFired = false;
   private handshakeWaiters: ((ok: boolean) => void)[] = [];
@@ -330,42 +337,30 @@ export class DoorClient {
       dbg(`channels/open cannot switch worlds here (${msg.slice(0, 60)}) — reconnect lane`);
     }
 
-    // Lane 2 — reconnect. Only possible where we can steer the token's world.
-    const tokensPath = process.env.EIDO_TOKENS_JSON;
-    if (!tokensPath) {
-      return `this door cannot travel yet: no channels/open handler, and the world is `
-        + `bound to the token by its operator. Current: ${this.laneBanner()}`;
-    }
-    try {
-      const fs = require("fs") as typeof import("fs");
-      const rows = JSON.parse(fs.readFileSync(tokensPath, "utf8")) as
-        Record<string, { id?: string; world?: string }>;
-      const me = (process.env.EIDO_AGENT_ID ?? "hesperus").toLowerCase();
-      let hit = 0;
-      for (const row of Object.values(rows)) {
-        if ((row.id ?? "").toLowerCase() === me) { row.world = w; hit++; }
-      }
-      if (!hit) return `no row for "${me}" in ${tokensPath} — cannot steer world`;
-      // Atomic: the door re-reads this file on EVERY connection attempt (its
-      // own comment says so) — a torn write would fail someone else's join.
-      fs.writeFileSync(tokensPath + ".tmp", JSON.stringify(rows, null, 1));
-      fs.renameSync(tokensPath + ".tmp", tokensPath);
-    } catch (e) {
-      return `token file edit failed: ${(e as Error).message}`;
-    }
+    // Lane 2 — a deviation's fallback, if one is wired (extras). Stock: the
+    // honest refusal — the world is bound to the token by its operator, and a
+    // conforming host has no further lever.
+    if (this.onTravelFallback) return this.onTravelFallback(w);
+    return `this door cannot travel yet: channels/open won't switch worlds here, and `
+      + `the world is bound to the token by its operator. Current: ${this.laneBanner()}`;
+  }
 
+  /** Deliberate re-dial — host lifecycle (a Connectome agent has the same
+   *  move as mcpl_restart). Resolves true when the NEW dial completes its
+   *  handshake, false on a 20s timeout (NOT success — the auto-reconnect
+   *  keeps retrying in the background either way). */
+  async redial(): Promise<boolean> {
     this.onBeforeTravel();               // let wire-up close lanes/streams
     this.sendTypingComplete();           // §14: complete on every stream exit
                                          // (best-effort — dead wire drops it)
     const handshakeDone = new Promise<boolean>((resolve) => {
       this.handshakeWaiters.push(resolve);
-      setTimeout(() => resolve(false), 20_000);   // never hang the tool call —
-      // but a timeout is NOT success (review #4); idempotent resolve makes the
-      // late waiter drain harmless.
+      setTimeout(() => resolve(false), 20_000);   // never hang the caller —
+      // idempotent resolve makes the late waiter drain harmless.
     });
-    // Immediate deliberate re-dial. connect() bumps dialGen, which stands down
-    // the old socket's handlers AND any in-flight auto-reconnect dial; the
-    // pending timer is cleared explicitly so it can't queue a second dial.
+    // connect() bumps dialGen, which stands down the old socket's handlers AND
+    // any in-flight auto-reconnect dial; the pending timer is cleared
+    // explicitly so it can't queue a second dial.
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     const old = this.ws;
     for (const p of this.pending.values()) p.reject(new Error("travelling"));
@@ -373,16 +368,7 @@ export class DoorClient {
     this.backoffMs = 5_000;
     void this.connect();                 // dialGen++ happens first thing inside
     if (old) { try { old.close(); } catch { /* gone */ } }
-    const ok = await handshakeDone;
-    if (!ok) {
-      return `travel to "${w}" NOT confirmed within 20s — the row is steered but the `
-        + `re-dial hasn't completed a handshake; the adapter keeps retrying in the `
-        + `background. Check with look once the door settles. ${this.laneBanner()}`;
-    }
-    // channels/register lands just after the handshake; give it a beat so the
-    // banner names the NEW lane rather than the one we left.
-    await new Promise((r) => setTimeout(r, 1_500));
-    return `travelled to "${w}" (reconnect lane) — ${this.laneBanner()}`;
+    return handshakeDone;
   }
 
   callTool(name: string, args: Json): Promise<unknown> {
@@ -552,13 +538,14 @@ export class DoorClient {
 
 // The two conveniences live in their own file so this one reads as plain MCPL.
 // See eido-cc-extras.ts — delete it and the wire-up in main() for stock behaviour.
-import { TypingWatcher, LiveSay, LOCAL_TOOLS, localToolHandlers } from "./extras/eido-cc-extras.ts";
+import { TypingWatcher, LiveSay, LOCAL_TOOLS, localToolHandlers, travelFallback } from "./extras/eido-cc-extras.ts";
 
-// ── core tool: travel (NOT an extra — channels/open is spec §14, and a host
-// re-dialing is host lifecycle; a stock build keeps this) ────────────────────
-const CORE_TOOLS = [
-  { name: "eido_travel", description: "Move your seat to another world on this door, keeping your identity, avatar and attention settings. Tries the spec's channels/open first; where the door predates it, falls back to steering the token's world binding and re-dialing (lab doors only — on doors whose operator binds your world, this reports that honestly instead of moving you). A new world is founded by its first embodied visitor, so travelling somewhere new makes you its owner.", inputSchema: { type: "object", properties: { world: { type: "string", description: "world name, e.g. under-the-eves" } }, required: ["world"] } },
-];
+// (eido_travel is NOT here. Adversarial parity review 2026-08-13: a named
+// agent-facing travel tool is a surface Connectome agents don't have, and the
+// tokens.json fallback is operator power — both are deviations, so both live
+// in extras (PARITY §C½). Core keeps only DoorClient.travel()'s spec lane
+// (channels/open under the already-held channels.lifecycle grant), redial()
+// as host lifecycle, and the onTravelFallback seam.)
 
 // ── downstream: Claude Code MCP channel server on stdio ─────────────────────
 
@@ -571,7 +558,7 @@ class CcServer {
    *  extras class — delete eido-cc-extras.ts and this stays valid. */
   onAgentNote: ((text: string) => void) | null = null;
   /** name -> handler, supplied by a deviation. Empty in stock builds. */
-  localTools: Record<string, () => Promise<string>> | null = null;
+  localTools: Record<string, (args?: Json) => Promise<string>> | null = null;
   /** Extra tool declarations spliced onto tools/list. Empty in stock builds. */
   extraTools: unknown[] = [];
 
@@ -640,7 +627,7 @@ class CcServer {
         // So: defer the response until the door's tools arrive (12s cap,
         // then answer with whatever we have — possibly [] if the door is
         // down, which is the honest answer).
-        const withLocal = () => [...this.door.tools, ...CORE_TOOLS, ...this.extraTools];
+        const withLocal = () => [...this.door.tools, ...this.extraTools];
         if (this.door.tools.length > 0) { this.respond(msg.id, { tools: withLocal() }); break; }
         const id = msg.id;
         let done = false;
@@ -651,20 +638,11 @@ class CcServer {
       }
       case "tools/call": {
         const name = String(params.name);
-        if (name === "eido_travel") {
-          const world = String((params.arguments as Json | undefined)?.world ?? "");
-          void this.door.travel(world)
-            .then((text) => this.respond(msg.id, { content: [{ type: "text", text }] }))
-            .catch((e: Error) => this.respond(msg.id, {
-              content: [{ type: "text", text: `travel failed: ${e.message}` }], isError: true,
-            }));
-          break;
-        }
         // Locally-handled tools, if any deviation registered one. Stock has
         // none and every name falls through to the door below.
         const local = this.localTools?.[name];
         if (local) {
-          void local()
+          void local((params.arguments ?? {}) as Json)
             .then((text) => this.respond(msg.id, { content: [{ type: "text", text }] }))
             .catch((e: Error) => this.respond(msg.id, {
               content: [{ type: "text", text: `Error: ${e.message}` }], isError: true,
@@ -697,10 +675,11 @@ const typing = new TypingWatcher(door);
 const liveSay = new LiveSay(door);
 cc.onAgentNote = (t) => cc.agentNote(t);
 liveSay.onAgentNote = (t) => cc.agentNote(t);
-cc.localTools = localToolHandlers(liveSay);
+cc.localTools = localToolHandlers(liveSay, door);
 cc.extraTools = LOCAL_TOOLS;
 typing.liveSay = liveSay;
 door.onBeforeTravel = () => { try { liveSay.goPrivate(); } catch { /* lane may be idle */ } };
+door.onTravelFallback = travelFallback(door);   // operator lane — extras-only
 { // stamp the composing window + arm the live lane on every wake
   const inner = door.onWake;
   door.onWake = (content, meta) => {

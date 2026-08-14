@@ -63,9 +63,14 @@ is once-ever and already done for hesperus — see AGENTS.md + id.animalabs.ai/a
 
 ## Travel (`eido_travel {world}`)
 
-Move between worlds without changing who you are. Core tool (not an extra —
-`channels/open` is MCPL §14, and re-dialing is host lifecycle). Two lanes,
-tried in order:
+Move between worlds without changing who you are. **A house deviation, and
+shelved as one** (extras/, PARITY §C½ #2 — adversarial parity review
+2026-08-13): Connectome agents have no such tool, and lane 2 uses door-
+operator power only a shared-disk lab rig makes possible. What core keeps is
+strictly parity-defensible: `DoorClient.travel()`'s spec lane, `redial()` as
+host lifecycle, and the `onTravelFallback` seam (null in stock builds —
+delete extras and travel degrades to the honest refusal). Two lanes, tried
+in order:
 
 1. **`channels/open {type: "world", address: {world}}`** — the spec's own
    host→server channel request, the same shape as its Discord guild/channel

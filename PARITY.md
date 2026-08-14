@@ -53,6 +53,22 @@ rendering chunk content as a forming bubble would give true token streaming
 with no new protocol. Session contract while live: prose IS speech.
 Kill switch: EIDO_LIVE=0. Everything else in eido-cc stays stock.
 
+**#2 — eido_travel** (2026-08-13, R's MCP-only porch-port benchmark; shelved
+here by that night's adversarial parity review). An agent-facing world-switch
+tool no Connectome agent has (their documented surface is door-axis only:
+mcpl_deploy/list/restart; RFC-004 §9 defers mobility semantics upstream).
+Lane 1 — spec-shaped and kept in core: channels/open {type:"world",
+address:{world}} under the already-held channels.lifecycle grant; today's
+door answers -32004 for a foreign world (its handler is blinds-on-the-bound-
+channel, net-server.ts:594). Lane 2 — the deviation proper, extras-only:
+where EIDO_TOKENS_JSON names a lab door's own token file (host and door
+sharing a disk on our rig), steer our row's `world` and redial(). That is
+OPERATOR power, impossible toward any remote door, which is why deleting
+extras must and does remove it. The lobbyable upgrade it argues for: the
+door swapping its WorldAgent on a foreign channels/open address + emitting
+channels/changed = zero-reconnect travel for every MCPL host, no new
+protocol. Kill switch: delete extras, or unset EIDO_TOKENS_JSON.
+
 ## D. Known limitations (the honest list)
 
 0. **Live-lane field defects, first live audience (Rabscuttle, 05:44-05:50Z
