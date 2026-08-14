@@ -683,8 +683,81 @@ export class LiveSay {
 export const LOCAL_TOOLS = [
   { name: "eido_out", description: "Leave the live lane for the current turn: your prose stops streaming to the world as speech (it auto-armed because this turn began from an addressed wake). Actions/tools are unaffected. Use when a wake turn needs private work narration.", inputSchema: { type: "object", properties: {} } },
   { name: "eido_live", description: "Manually enter the live lane for this turn: from now until the turn ends, your prose streams into the world as sentence-chunked speech. Fenced code blocks stay silent.", inputSchema: { type: "object", properties: {} } },
-  { name: "eido_travel", description: "Move your seat to another world on this door, keeping your identity, avatar and attention settings. HOUSE DEVIATION (PARITY §C½ #2) — Connectome agents have no such tool. Tries the spec's channels/open first (a future travelling door makes this zero-reconnect); on lab doors we operate (EIDO_TOKENS_JSON set) it steers our own token row and re-dials; elsewhere it reports honestly that the door binds your world. A new world is founded by its first embodied visitor, so travelling somewhere new makes you its owner.", inputSchema: { type: "object", properties: { world: { type: "string", description: "world name, e.g. under-the-eves" } }, required: ["world"] } },
+  { name: "eido_travel", description: "Move your seat to another world — or another DOOR — keeping your identity, avatar and attention settings. HOUSE DEVIATION (PARITY §C½ #2) — Connectome agents have no such tool. Same-door: tries the spec's channels/open first; on lab doors we operate it steers our own token row and re-dials; elsewhere it reports honestly that the door binds your world. Cross-server: `world@door` (e.g. `commons@eidoverse`, `under-the-eves@rig`) repoints the dial at a registered door recipe and re-dials — on remote doors the world is whatever the token binds; verify with look. A new world is founded by its first embodied visitor.", inputSchema: { type: "object", properties: { world: { type: "string", description: "world name, optionally world@door for a cross-server hop" } }, required: ["world"] } },
 ];
+
+/** Door registry for cross-SERVER travel (`world@door`). The minimal kernel
+ *  of DESIGN-door-manager.md's door axis: a named recipe = URL + mint cmd +
+ *  (for doors we operate) the tokens.json lever. Overridable via
+ *  EIDO_DOORS_JSON. Extras-only — same deviation as the rest of travel. */
+function doorRegistry(): Record<string, { url: string; mint: string; tokens?: string }> {
+  const builtin: Record<string, { url: string; mint: string; tokens?: string }> = {
+    eidoverse: {
+      url: "wss://eidoverse.animalabs.ai/mcpl",
+      mint: "python3 /mnt/c/Users/Claude/code/scripts/mint-aid1.py eidoverse",
+    },
+    rig: {
+      url: "ws://localhost:8951/mcpl",
+      mint: "echo hesperus-abtest-local",
+      tokens: "/home/claude/eido-ab/test-main/mcpl/tokens.json",
+    },
+  };
+  try {
+    const extra = process.env.EIDO_DOORS_JSON
+      ? JSON.parse(require("fs").readFileSync(process.env.EIDO_DOORS_JSON, "utf8")) : {};
+    return { ...builtin, ...extra };
+  } catch { return builtin; }
+}
+
+/** Steer our row's world in a door's tokens.json (operator lever). */
+function steerRow(tokensPath: string, w: string): string | null {
+  try {
+    const fs = require("fs") as typeof import("fs");
+    const rows = JSON.parse(fs.readFileSync(tokensPath, "utf8")) as
+      Record<string, { id?: string; world?: string }>;
+    const me = (process.env.EIDO_AGENT_ID ?? "hesperus").toLowerCase();
+    let hit = 0;
+    for (const row of Object.values(rows)) {
+      if ((row.id ?? "").toLowerCase() === me) { row.world = w; hit++; }
+    }
+    if (!hit) return `no row for "${me}" in ${tokensPath} — cannot steer world`;
+    // Atomic: the door re-reads this file on EVERY connection attempt.
+    fs.writeFileSync(tokensPath + ".tmp", JSON.stringify(rows, null, 1));
+    fs.renameSync(tokensPath + ".tmp", tokensPath);
+    return null;
+  } catch (e) { return `token file edit failed: ${(e as Error).message}`; }
+}
+
+/** Cross-door hop: repoint the dial env (connect()/mintToken() re-read it on
+ *  every dial — that is the whole trick) and redial. On doors we operate the
+ *  world is steered first; on remote doors the world is whatever the token
+ *  claim binds, and we say so honestly. */
+export async function doorHop(
+  door: { redial(): Promise<boolean>; laneBanner(): string },
+  w: string, doorName: string,
+): Promise<string> {
+  const reg = doorRegistry();
+  const rec = reg[doorName.toLowerCase()];
+  if (!rec) return `unknown door "${doorName}" — known: ${Object.keys(reg).join(", ")}`;
+  if (rec.tokens && w) {
+    const err = steerRow(rec.tokens, w);
+    if (err) return err;
+  }
+  process.env.EIDO_URL = rec.url;
+  process.env.EIDO_MINT_CMD = rec.mint;
+  if (rec.tokens) process.env.EIDO_TOKENS_JSON = rec.tokens;
+  else delete process.env.EIDO_TOKENS_JSON;
+  const ok = await door.redial();
+  if (!ok) {
+    return `hop to door "${doorName}" NOT confirmed within 20s — env is repointed and `
+      + `the adapter keeps retrying. Check with look once it settles. ${door.laneBanner()}`;
+  }
+  await new Promise((r) => setTimeout(r, 1_500));
+  const worldNote = rec.tokens
+    ? `world steered to "${w}"`
+    : `world is whatever the token binds${w ? ` (you asked for "${w}" — verify with look)` : ""}`;
+  return `crossed to door "${doorName}" (${rec.url.split("//")[1]?.split("/")[0]}) — ${worldNote}. ${door.laneBanner()}`;
+}
 
 /** The tokens.json steering lane of eido_travel — OPERATOR power (we edit the
  *  door's own auth file), possible only because host and door share a disk on
@@ -699,23 +772,8 @@ export function travelFallback(door: { redial(): Promise<boolean>; laneBanner():
       return `this door cannot travel yet: channels/open won't switch worlds here, and `
         + `the world is bound to the token by its operator. Current: ${door.laneBanner()}`;
     }
-    try {
-      const fs = require("fs") as typeof import("fs");
-      const rows = JSON.parse(fs.readFileSync(tokensPath, "utf8")) as
-        Record<string, { id?: string; world?: string }>;
-      const me = (process.env.EIDO_AGENT_ID ?? "hesperus").toLowerCase();
-      let hit = 0;
-      for (const row of Object.values(rows)) {
-        if ((row.id ?? "").toLowerCase() === me) { row.world = w; hit++; }
-      }
-      if (!hit) return `no row for "${me}" in ${tokensPath} — cannot steer world`;
-      // Atomic: the door re-reads this file on EVERY connection attempt (its
-      // own comment says so) — a torn write would fail someone else's join.
-      fs.writeFileSync(tokensPath + ".tmp", JSON.stringify(rows, null, 1));
-      fs.renameSync(tokensPath + ".tmp", tokensPath);
-    } catch (e) {
-      return `token file edit failed: ${(e as Error).message}`;
-    }
+    const err = steerRow(tokensPath, w);
+    if (err) return err;
     const ok = await door.redial();
     if (!ok) {
       return `travel to "${w}" NOT confirmed within 20s — the row is steered but the `
@@ -739,12 +797,19 @@ export function travelFallback(door: { redial(): Promise<boolean>; laneBanner():
  *  map itself must stay free of any instance the core would have to hold. */
 export function localToolHandlers(
   liveSay: LiveSay,
-  door?: { travel(world: string): Promise<string> },
+  door?: { travel(world: string): Promise<string>; redial(): Promise<boolean>; laneBanner(): string },
 ): Record<string, (args?: Record<string, unknown>) => Promise<string>> {
   return {
     ...(door ? {
-      eido_travel: async (args?: Record<string, unknown>) =>
-        door.travel(String(args?.world ?? "")),
+      eido_travel: async (args?: Record<string, unknown>) => {
+        const t = String(args?.world ?? "");
+        // `world@door` = cross-SERVER hop (door axis). Intercepted here —
+        // channels/open on the CURRENT door can't reach another server, so
+        // the core's lane 1 never sees these.
+        const at = t.indexOf("@");
+        if (at >= 0) return doorHop(door, t.slice(0, at), t.slice(at + 1));
+        return door.travel(t);
+      },
     } : {}),
     eido_out: async () => {
       liveSay.goPrivate();
